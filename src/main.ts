@@ -237,6 +237,7 @@ await Actor.main(async () => {
         maxRequestRetries: 3,
         requestHandlerTimeoutSecs: 30,
         maxConcurrency: 2,
+        additionalMimeTypes: ['application/octet-stream'],
 
         async requestHandler({ request, body }) {
             const { keyword, limit: kwLimit } = request.userData as {
