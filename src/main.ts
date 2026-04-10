@@ -125,14 +125,32 @@ await Actor.main(async () => {
         };
         page.on('response', responseHandler);
 
-        try {
-            await page.goto(buildSearchUrl(keyword, dateFilter), { waitUntil: 'commit', timeout: 60000 });
-        } catch { log.info('Navigation slow, continuing...'); }
+        // Try loading the search page — retry up to 3 times
+        let pageLoaded = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                await page.goto(buildSearchUrl(keyword, dateFilter), { waitUntil: 'domcontentloaded', timeout: 45000 });
+                pageLoaded = true;
+                break;
+            } catch (err) {
+                log.warning(`  Attempt ${attempt}/3 failed: ${(err as Error).message.slice(0, 100)}`);
+                if (attempt < 3) await page.waitForTimeout(3000);
+            }
+        }
+
+        if (!pageLoaded) {
+            log.error(`  Could not load search page for "${keyword}", skipping`);
+            continue;
+        }
 
         // Wait for content to render
         try {
             await page.waitForSelector('[role="listitem"]', { timeout: 15000 });
-        } catch { /* may not appear */ }
+            log.info('  Content rendered');
+        } catch {
+            log.warning('  No listitem found, waiting longer...');
+            await page.waitForTimeout(8000);
+        }
         await page.waitForTimeout(3000);
 
         // Also extract URNs from current page HTML
