@@ -201,10 +201,9 @@ await Actor.main(async () => {
             let noNewResults = 0;
 
             while (collected < limit && noNewResults < 3) {
-                // Extract posts from DOM
+                // Extract posts from DOM — LinkedIn uses role="listitem" for each post
                 const posts = await page.evaluate(() => {
                     const results: { url: string; author: string; reactions: number; comments: number }[] = [];
-                    const seenLocal = new Set<string>();
 
                     function parseNum(text: string | null | undefined): number {
                         if (!text) return 0;
@@ -215,52 +214,45 @@ await Actor.main(async () => {
                         return isNaN(num) ? 0 : num;
                     }
 
-                    const links = document.querySelectorAll('a[href*="/feed/update/"], a[href*="/posts/"]');
+                    const postContainers = document.querySelectorAll('[role="listitem"]');
 
-                    for (const link of links) {
-                        const href = (link as HTMLAnchorElement).href;
-                        if (!href || seenLocal.has(href)) continue;
-                        if (!href.includes('/feed/update/') && !href.includes('/posts/')) continue;
-                        seenLocal.add(href);
+                    for (const container of postContainers) {
+                        // Find profile link (author URL)
+                        const profileLink = container.querySelector('a[href*="/in/"], a[href*="/company/"]') as HTMLAnchorElement;
+                        if (!profileLink) continue;
+                        const profileUrl = profileLink.href.split('?')[0];
 
-                        const container = link.closest('.feed-shared-update-v2, [data-urn], .reusable-search__result-container, .search-content__result');
-
+                        // Author name from aria-label
                         let author = 'Unknown';
-                        if (container) {
-                            const nameEl = container.querySelector(
-                                '.update-components-actor__name span[aria-hidden="true"], ' +
-                                '.entity-result__title-text a span, ' +
-                                '.app-aware-link span[aria-hidden="true"], ' +
-                                '.feed-shared-actor__name span[aria-hidden="true"]'
-                            );
-                            if (nameEl?.textContent?.trim()) {
-                                author = nameEl.textContent.trim();
+                        const authorEl = container.querySelector('[aria-label*="post by"]');
+                        if (authorEl) {
+                            const label = authorEl.getAttribute('aria-label') ?? '';
+                            // "Open control menu for post by Palak Sharma"
+                            const match = label.match(/post by (.+)/i);
+                            if (match) author = match[1].trim();
+                        }
+                        if (author === 'Unknown') {
+                            // Fallback: first bold name text in the container
+                            const nameP = container.querySelector('p');
+                            if (nameP?.textContent?.trim() && nameP.textContent.trim().length < 50) {
+                                author = nameP.textContent.trim();
                             }
                         }
 
+                        // Reactions from screen-reader span
                         let reactions = 0;
                         let comments = 0;
-                        if (container) {
-                            const reactionsEl = container.querySelector(
-                                '.social-details-social-counts__reactions-count, ' +
-                                '[aria-label*="reaction"], ' +
-                                '.social-details-social-counts__count-value'
-                            );
-                            if (reactionsEl) {
-                                reactions = parseNum(reactionsEl.textContent) ||
-                                    parseNum(reactionsEl.getAttribute('aria-label')?.match(/(\d[\d,]*)/)?.[1]);
-                            }
-
-                            const commentsEl = container.querySelector(
-                                '[aria-label*="comment"], button[aria-label*="comment"]'
-                            );
-                            if (commentsEl) {
-                                const label = commentsEl.getAttribute('aria-label') ?? commentsEl.textContent ?? '';
-                                comments = parseNum(label.match(/(\d[\d,]*)/)?.[1] ?? label);
+                        const srSpans = container.querySelectorAll('span');
+                        for (const span of srSpans) {
+                            const text = span.textContent?.trim().toLowerCase() ?? '';
+                            if (text.match(/^\d+\s*reactions?$/)) {
+                                reactions = parseNum(text.match(/(\d+)/)?.[1]);
+                            } else if (text.match(/^\d+\s*comments?$/)) {
+                                comments = parseNum(text.match(/(\d+)/)?.[1]);
                             }
                         }
 
-                        results.push({ url: href, author, reactions, comments });
+                        results.push({ url: profileUrl, author, reactions, comments });
                     }
 
                     return results;
