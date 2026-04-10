@@ -60,22 +60,16 @@ function resolveLinkedInDateFilter(input: Input): string {
 // ─── LinkedIn Voyager API helpers ─────────────────────────────────────────────
 
 function buildVoyagerUrl(keyword: string, start: number = 0, dateFilter: string = ''): string {
-    const filters = dateFilter
-        ? `List(resultType->CONTENT,datePosted->${dateFilter})`
-        : 'List(resultType->CONTENT)';
+    const filters: string[] = ['(key:resultType,value:List(CONTENT))'];
+    if (dateFilter) {
+        filters.push(`(key:datePosted,value:List(${dateFilter}))`);
+    }
 
-    const params = new URLSearchParams({
-        decorationId: 'com.linkedin.voyager.deco.content.SearchClusterCollection-198',
-        count: '10',
-        filters,
-        keywords: keyword,
-        origin: 'GLOBAL_SEARCH_HEADER',
-        q: 'all',
-        queryContext: 'List(spellCorrectionEnabled->true,relatedSearchesEnabled->true)',
-        start: String(start),
-    });
+    const queryParameters = `List(${filters.join(',')})`;
+    const variables = `(start:${start},origin:GLOBAL_SEARCH_HEADER,query:(keywords:${encodeURIComponent(keyword)},flagshipSearchIntent:SEARCH_SRP,queryParameters:${queryParameters},includeFiltersInResponse:false))`;
+    const queryId = 'voyagerSearchDashClusters.b0928897b71bd00a5a7291755dcd64f0';
 
-    return `https://www.linkedin.com/voyager/api/search/dash/clusters?${params.toString()}`;
+    return `https://www.linkedin.com/voyager/api/graphql?variables=${variables}&queryId=${queryId}`;
 }
 
 // Generate a consistent random JSESSIONID for the run
@@ -115,17 +109,17 @@ function extractPostsFromVoyagerResponse(data: any, keyword: string): PostResult
     const now = new Date().toISOString();
 
     try {
-        const elements = data?.elements ?? [];
+        // GraphQL response: data.data.searchDashClustersByAll.elements[]
+        const clusters =
+            data?.data?.searchDashClustersByAll?.elements ??
+            data?.elements ??
+            [];
 
-        for (const element of elements) {
-            const items = element?.items ?? [];
+        for (const cluster of clusters) {
+            const items = cluster?.items ?? [];
 
             for (const item of items) {
-                const entity =
-                    item?.item?.entityResult ??
-                    item?.item?.contentResult ??
-                    item?.item?.miniProfile;
-
+                const entity = item?.item?.entityResult;
                 if (!entity) continue;
 
                 const trackingUrn: string = entity.trackingUrn ?? '';
@@ -148,8 +142,7 @@ function extractPostsFromVoyagerResponse(data: any, keyword: string): PostResult
                 const authorName: string =
                     entity.title?.text ??
                     entity.primarySubtitle?.text ??
-                    entity.actor?.name?.text ??
-                    entity.name?.text ??
+                    entity.summary?.text ??
                     'Unknown';
 
                 results.push({
