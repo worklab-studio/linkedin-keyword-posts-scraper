@@ -173,22 +173,7 @@ await Actor.main(async () => {
             await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
             await page.waitForTimeout(5000);
 
-            // Log current URL and page state
-            log.info(`Current URL: ${page.url()}`);
-            const title = await page.title();
-            log.info(`Page title: ${title}`);
-
-            // Save screenshot for debugging
-            const screenshot = await page.screenshot({ fullPage: false });
-            await Actor.setValue(`screenshot-${keyword}`, screenshot, { contentType: 'image/png' });
-            log.info(`Screenshot saved as screenshot-${keyword}`);
-
-            // Log how many links are on the page
-            const linkCount = await page.evaluate(() => {
-                const all = document.querySelectorAll('a[href*="/feed/update/"], a[href*="/posts/"]');
-                return { total: all.length, hrefs: Array.from(all).slice(0, 5).map(a => (a as HTMLAnchorElement).href) };
-            });
-            log.info(`Post links found: ${linkCount.total}, samples: ${JSON.stringify(linkCount.hrefs)}`);
+            log.info(`Page loaded: ${page.url()}`);
 
             // Check for redirect
             if (page.url().includes('/login') || page.url().includes('/authwall')) {
