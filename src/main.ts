@@ -21,6 +21,8 @@ interface PostResult {
     author_name: string;
     keyword: string;
     post_url: string;
+    reactions: number;
+    comments: number;
     scraped_at: string;
 }
 
@@ -143,7 +145,16 @@ await Actor.main(async () => {
             while (collected < kwLimit && noNewResults < 3) {
                 // Extract post data from the page
                 const posts = await page.evaluate(() => {
-                    const results: { url: string; author: string }[] = [];
+                    const results: { url: string; author: string; reactions: number; comments: number }[] = [];
+
+                    function parseCount(text: string | null | undefined): number {
+                        if (!text) return 0;
+                        const cleaned = text.trim().toLowerCase().replace(/,/g, '');
+                        if (cleaned.includes('k')) return Math.round(parseFloat(cleaned) * 1000);
+                        if (cleaned.includes('m')) return Math.round(parseFloat(cleaned) * 1000000);
+                        const num = parseInt(cleaned, 10);
+                        return isNaN(num) ? 0 : num;
+                    }
 
                     // Get all post update links
                     const links = document.querySelectorAll('a[href*="/feed/update/"], a[href*="/posts/"]');
@@ -155,9 +166,11 @@ await Actor.main(async () => {
                         if (!href.includes('/feed/update/') && !href.includes('/posts/')) continue;
                         seenLocal.add(href);
 
-                        // Try to find author name near this link
-                        let author = 'Unknown';
+                        // Find the parent post container
                         const container = link.closest('.feed-shared-update-v2, .update-components-actor, [data-urn], .reusable-search__result-container');
+
+                        // Author name
+                        let author = 'Unknown';
                         if (container) {
                             const nameEl = container.querySelector('.update-components-actor__name span, .entity-result__title-text a span, .app-aware-link span[aria-hidden="true"], .feed-shared-actor__name span');
                             if (nameEl?.textContent?.trim()) {
@@ -165,7 +178,26 @@ await Actor.main(async () => {
                             }
                         }
 
-                        results.push({ url: href, author });
+                        // Reactions count (likes/reactions)
+                        let reactions = 0;
+                        if (container) {
+                            const reactionsEl = container.querySelector('.social-details-social-counts__reactions-count, [aria-label*="reaction"], [aria-label*="like"], .social-details-social-counts__count-value');
+                            reactions = parseCount(reactionsEl?.textContent);
+                            if (!reactions) {
+                                const ariaLabel = reactionsEl?.getAttribute('aria-label') ?? '';
+                                reactions = parseCount(ariaLabel.match(/(\d[\d,]*)/)?.[1]);
+                            }
+                        }
+
+                        // Comments count
+                        let comments = 0;
+                        if (container) {
+                            const commentsEl = container.querySelector('[aria-label*="comment"], button[aria-label*="comment"]');
+                            const commentsLabel = commentsEl?.getAttribute('aria-label') ?? commentsEl?.textContent ?? '';
+                            comments = parseCount(commentsLabel.match(/(\d[\d,]*)/)?.[1] ?? commentsLabel);
+                        }
+
+                        results.push({ url: href, author, reactions, comments });
                     }
 
                     return results;
@@ -186,6 +218,8 @@ await Actor.main(async () => {
                         author_name: post.author,
                         keyword,
                         post_url: postUrl,
+                        reactions: post.reactions,
+                        comments: post.comments,
                         scraped_at: now,
                     } as PostResult);
 
