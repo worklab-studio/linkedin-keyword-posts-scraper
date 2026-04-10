@@ -19,6 +19,13 @@
             "minimum": 1,
             "maximum": 200
         },
+        "li_at": {
+            "title": "LinkedIn li_at cookie (optional)",
+            "type": "string",
+            "description": "Optional. Provides more post URNs. Find in DevTools > Application > Cookies > linkedin.com.",
+            "editor": "textfield",
+            "isSecret": true
+        },
         "proxy": {
             "title": "Proxy configuration",
             "type": "object",

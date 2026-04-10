@@ -4,6 +4,7 @@ import { Dataset, log, CheerioCrawler } from 'crawlee';
 interface Input {
     urls: string[];
     limit?: number;
+    li_at?: string;
     proxy?: {
         useApifyProxy?: boolean;
         apifyProxyGroups?: string[];
@@ -76,14 +77,14 @@ await Actor.main(async () => {
         log.info(`Fetching: ${url}`);
 
         try {
-            const res = await fetch(url, {
-                headers: {
-                    'accept': 'text/html,application/xhtml+xml',
-                    'accept-language': 'en-US,en;q=0.9',
-                    'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                },
-                redirect: 'follow',
-            });
+            const headers: Record<string, string> = {
+                'accept': 'text/html,application/xhtml+xml',
+                'accept-language': 'en-US,en;q=0.9',
+                'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            };
+            if (input.li_at) headers['cookie'] = `li_at=${input.li_at}`;
+
+            const res = await fetch(url, { headers, redirect: 'follow' });
             const html = await res.text();
             log.info(`  Got ${html.length} chars`);
 
