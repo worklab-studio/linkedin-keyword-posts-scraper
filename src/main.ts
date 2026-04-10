@@ -103,39 +103,59 @@ await Actor.main(async () => {
 
     const crawler = new PlaywrightCrawler({
         proxyConfiguration,
-        maxRequestRetries: 2,
+        maxRequestRetries: 1,
         requestHandlerTimeoutSecs: 120,
         maxConcurrency: 1,
         headless: true,
+        useSessionPool: false,
         launchContext: {
             launchOptions: { args: ['--disable-blink-features=AutomationControlled'] },
         },
+
+        preNavigationHooks: [
+            async ({ page }) => {
+                await page.context().addCookies([
+                    {
+                        name: 'li_at',
+                        value: input.li_at,
+                        domain: '.linkedin.com',
+                        path: '/',
+                        httpOnly: true,
+                        secure: true,
+                    },
+                    {
+                        name: 'JSESSIONID',
+                        value: `"ajax:${Math.random().toString(36).slice(2)}"`,
+                        domain: '.linkedin.com',
+                        path: '/',
+                        secure: true,
+                    },
+                ]);
+            },
+        ],
 
         async requestHandler({ request, page }) {
             const { keyword } = request.userData as { keyword: string };
             const kwLimit = Math.min(limit, 500);
 
-            // Set LinkedIn cookie before navigating
-            await page.context().addCookies([{
-                name: 'li_at',
-                value: input.li_at,
-                domain: '.linkedin.com',
-                path: '/',
-                httpOnly: true,
-                secure: true,
-            }]);
-
-            const url = buildSearchUrl(keyword, dateFilter);
             log.info(`Navigating to search for "${keyword}"...`);
+
+            // Navigate to LinkedIn first to establish cookies
+            await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await page.waitForTimeout(2000);
+
+            // Now navigate to search
+            const url = buildSearchUrl(keyword, dateFilter);
             await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
             // Wait for results to load
-            await page.waitForTimeout(3000);
+            await page.waitForTimeout(4000);
 
             // Check if logged in
-            const pageContent = await page.content();
-            if (pageContent.includes('login') && !pageContent.includes('search-results')) {
-                log.warning('May not be logged in — checking...');
+            const currentUrl = page.url();
+            if (currentUrl.includes('/login') || currentUrl.includes('/authwall')) {
+                log.error(`Redirected to login for "${keyword}" — li_at cookie may be expired`);
+                return;
             }
 
             const now = new Date().toISOString();
@@ -250,6 +270,9 @@ await Actor.main(async () => {
             }
 
             log.info(`"${keyword}": scraped ${collected} posts`);
+
+            // Delay between keywords to avoid detection
+            await page.waitForTimeout(3000 + Math.random() * 3000);
         },
 
         failedRequestHandler({ request, error }) {
