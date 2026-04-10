@@ -1,0 +1,33 @@
+{
+    "actorSpecification": 1,
+    "name": "linkedin-keyword-posts-scraper",
+    "title": "LinkedIn Keyword Posts URL Scraper",
+    "description": "Scrapes LinkedIn post URLs by keyword with date filters. Returns author name, keyword, and post URL.",
+    "version": "1.0",
+    "buildTag": "latest",
+    "environmentVariables": {},
+    "dockerfile": "../Dockerfile",
+    "input": "./input_schema.json",
+    "storages": {
+        "dataset": {
+            "actorSpecification": 1,
+            "views": {
+                "overview": {
+                    "title": "Results",
+                    "transformation": {
+                        "fields": ["author_name", "keyword", "post_url", "scraped_at"]
+                    },
+                    "display": {
+                        "component": "table",
+                        "properties": {
+                            "author_name": { "label": "Author", "format": "text" },
+                            "keyword": { "label": "Keyword", "format": "text" },
+                            "post_url": { "label": "Post URL", "format": "link" },
+                            "scraped_at": { "label": "Scraped At", "format": "datetime" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

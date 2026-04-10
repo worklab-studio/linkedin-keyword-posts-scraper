@@ -1,0 +1,89 @@
+{
+    "title": "LinkedIn Keyword Posts Scraper",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "keywords": {
+            "title": "Keywords",
+            "type": "array",
+            "description": "List of keywords to search LinkedIn posts for.",
+            "editor": "stringList",
+            "prefill": ["product design", "AI tools"]
+        },
+        "date": {
+            "title": "Date Range (preset)",
+            "type": "string",
+            "description": "Predefined date range filter. If set and not 'ignore', takes precedence over from/to.",
+            "editor": "select",
+            "enum": [
+                "ignore",
+                "last-1-day",
+                "last-3-days",
+                "last-1-week",
+                "last-2-weeks",
+                "last-1-month",
+                "last-2-months",
+                "last-3-months",
+                "last-6-months",
+                "last-1-year"
+            ],
+            "enumTitles": [
+                "Ignore (use from/to)",
+                "Last 1 day",
+                "Last 3 days",
+                "Last 1 week",
+                "Last 2 weeks",
+                "Last 1 month",
+                "Last 2 months",
+                "Last 3 months",
+                "Last 6 months",
+                "Last 1 year"
+            ],
+            "default": "last-3-months"
+        },
+        "from": {
+            "title": "From date",
+            "type": "string",
+            "description": "Start date (YYYY-MM-DD). Only used when date is 'ignore' or not set.",
+            "editor": "textfield",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "to": {
+            "title": "To date",
+            "type": "string",
+            "description": "End date (YYYY-MM-DD). Only used when date is 'ignore' or not set.",
+            "editor": "textfield",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "limit": {
+            "title": "Result limit per keyword",
+            "type": "integer",
+            "description": "Maximum number of posts to scrape per keyword.",
+            "editor": "number",
+            "default": 50,
+            "minimum": 1,
+            "maximum": 500
+        },
+        "li_at": {
+            "title": "LinkedIn li_at cookie",
+            "type": "string",
+            "description": "Your LinkedIn session cookie (li_at). Required for authenticated search. Find it in browser DevTools > Application > Cookies > linkedin.com.",
+            "editor": "textfield",
+            "isSecret": true
+        },
+        "use_playwright": {
+            "title": "Use Playwright (browser mode)",
+            "type": "boolean",
+            "description": "Use a real browser instead of the HTTP API. Slower but more resilient to rate limiting.",
+            "default": false
+        },
+        "proxy": {
+            "title": "Proxy configuration",
+            "type": "object",
+            "description": "Proxy settings. Recommended: use Apify Residential proxies.",
+            "editor": "proxy",
+            "prefill": { "useApifyProxy": true, "apifyProxyGroups": ["RESIDENTIAL"] }
+        }
+    },
+    "required": ["keywords", "li_at"]
+}

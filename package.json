@@ -1,0 +1,26 @@
+{
+    "name": "linkedin-keyword-posts-scraper",
+    "version": "1.0.0",
+    "description": "LinkedIn keyword posts URL scraper built with Crawlee for Apify platform",
+    "type": "module",
+    "main": "dist/main.js",
+    "scripts": {
+        "start": "node dist/main.js",
+        "build": "tsc",
+        "dev": "tsx src/main.ts",
+        "lint": "tsc --noEmit"
+    },
+    "dependencies": {
+        "apify": "^3.2.0",
+        "crawlee": "^3.16.0",
+        "playwright": "^1.44.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "tsx": "^4.0.0",
+        "typescript": "^5.0.0"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    }
+}
