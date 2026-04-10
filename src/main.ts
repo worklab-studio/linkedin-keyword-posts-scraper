@@ -142,10 +142,15 @@ await Actor.main(async () => {
 
     const page = await context.newPage();
 
-    // Warm up session — visit feed first
+    // Warm up session — visit a lightweight LinkedIn page first
     log.info('Warming up LinkedIn session...');
-    await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(3000);
+    try {
+        await page.goto('https://www.linkedin.com/check/ring/dashboard', { waitUntil: 'commit', timeout: 15000 });
+    } catch {
+        // Even if it times out, cookies are set and session may be established
+        log.info('Warmup page slow, continuing anyway...');
+    }
+    await page.waitForTimeout(2000);
 
     const currentUrl = page.url();
     if (currentUrl.includes('/login') || currentUrl.includes('/authwall')) {
@@ -153,7 +158,7 @@ await Actor.main(async () => {
         await browser.close();
         throw new Error('LinkedIn authentication failed. Please refresh your li_at cookie.');
     }
-    log.info('Session established successfully');
+    log.info('Session established');
 
     // Scrape each keyword
     const keywordCounts: Record<string, number> = {};
@@ -165,7 +170,7 @@ await Actor.main(async () => {
         log.info(`Searching for "${keyword}"...`);
 
         try {
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
             await page.waitForTimeout(4000);
 
             // Check for redirect
