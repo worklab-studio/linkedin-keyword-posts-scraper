@@ -226,62 +226,59 @@ await Actor.main(async () => {
     const seenUrls = new Set<string>();
 
     for (const keyword of input.keywords) {
-        let start = 0;
-        let emptyPages = 0;
+        const prevCount = keywordCounts[keyword];
 
-        while (keywordCounts[keyword] < limit && emptyPages < 2) {
-            const url = buildSearchPageUrl(keyword, start, dateFilter);
-            log.info(`Fetching "${keyword}" start=${start}...`);
+        const url = buildSearchPageUrl(keyword, 0, dateFilter);
+        log.info(`Fetching "${keyword}"...`);
 
-            try {
-                const res = await fetch(url, {
-                    headers: getPageHeaders(input.li_at),
-                    redirect: 'follow',
-                });
+        try {
+            const res = await fetch(url, {
+                headers: getPageHeaders(input.li_at),
+                redirect: 'follow',
+            });
 
-                if (!res.ok) {
-                    log.warning(`HTTP ${res.status} for "${keyword}" — stopping`);
-                    break;
-                }
-
-                const html = await res.text();
-                log.info(`Got ${html.length} chars of HTML for "${keyword}"`);
-
-                // Check if we're redirected to login
-                if (html.includes('/login') && !html.includes('search-results')) {
-                    log.error('Redirected to login — li_at cookie may be expired');
-                    break;
-                }
-
-                const posts = extractPostsFromHtml(html, keyword);
-                log.info(`Extracted ${posts.length} posts from HTML for "${keyword}"`);
-
-                if (posts.length === 0) {
-                    emptyPages++;
-                    if (emptyPages >= 2) {
-                        log.info(`No more results for "${keyword}"`);
-                        break;
-                    }
-                } else {
-                    emptyPages = 0;
-                }
-
-                for (const post of posts) {
-                    if (keywordCounts[keyword] >= limit) break;
-                    if (seenUrls.has(post.post_url)) continue;
-                    seenUrls.add(post.post_url);
-                    await Dataset.pushData(post);
-                    keywordCounts[keyword]++;
-                }
-
-                start += 10;
-
-                // Rate limit protection
-                await new Promise(r => setTimeout(r, 1500 + Math.random() * 1500));
-            } catch (err) {
-                log.error(`Fetch error for "${keyword}": ${(err as Error).message}`);
-                break;
+            if (!res.ok) {
+                log.warning(`HTTP ${res.status} for "${keyword}" — stopping`);
+                continue;
             }
+
+            const html = await res.text();
+            log.info(`Got ${html.length} chars of HTML for "${keyword}"`);
+
+            // Check if we're redirected to login
+            if (html.includes('/login') && !html.includes('search-results')) {
+                log.error('Redirected to login — li_at cookie may be expired');
+                continue;
+            }
+
+            // Log a sample of the HTML around search results for debugging
+            const srIdx = html.indexOf('search-result');
+            if (srIdx >= 0) {
+                log.info(`Found "search-result" in HTML at pos ${srIdx}`);
+                log.info(`HTML sample: ${html.slice(srIdx, srIdx + 500)}`);
+            } else {
+                log.info('No "search-result" found in HTML');
+            }
+
+            // Log embedded <code> blocks count
+            const codeMatches = html.match(/<code[^>]*id="bpr-guid/g);
+            log.info(`Found ${codeMatches?.length ?? 0} LinkedIn <code> data blocks`);
+
+            const posts = extractPostsFromHtml(html, keyword);
+            log.info(`Extracted ${posts.length} unique posts for "${keyword}"`);
+            if (posts.length > 0) {
+                log.info(`Sample post: ${JSON.stringify(posts[0])}`);
+            }
+
+            for (const post of posts) {
+                if (keywordCounts[keyword] >= limit) break;
+                if (seenUrls.has(post.post_url)) continue;
+                seenUrls.add(post.post_url);
+                await Dataset.pushData(post);
+                keywordCounts[keyword]++;
+            }
+        } catch (err) {
+            log.error(`Fetch error for "${keyword}": ${(err as Error).message}`);
         }
 
         log.info(`"${keyword}": ${keywordCounts[keyword]} posts collected`);
