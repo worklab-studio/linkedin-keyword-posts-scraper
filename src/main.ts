@@ -247,25 +247,20 @@ await Actor.main(async () => {
             }
 
             // Debug: log response structure
-            const clusters = data?.data?.data?.searchDashClustersByAll ?? data?.data?.searchDashClustersByAll;
+            const clusters = data?.data?.searchDashClustersByAll;
             log.info(`Clusters found: ${!!clusters}, totalResultCount: ${clusters?.metadata?.totalResultCount}`);
             log.info(`Elements count: ${clusters?.elements?.length}`);
-            if (clusters?.elements?.[0]) {
-                const el = clusters.elements[0];
-                // Check results array (may contain URN references)
-                log.info(`First element results count: ${el.results?.length}`);
-                if (el.results?.[0]) {
-                    log.info(`First result (500 chars): ${JSON.stringify(el.results[0]).slice(0, 500)}`);
-                }
-                if (el.results?.[1]) {
-                    log.info(`Second result (500 chars): ${JSON.stringify(el.results[1]).slice(0, 500)}`);
+            // Log ALL elements summaries
+            for (let i = 0; i < (clusters?.elements?.length ?? 0); i++) {
+                const el = clusters.elements[i];
+                log.info(`Element[${i}] items: ${el.items?.length}, title: ${el.title ?? 'null'}`);
+                if (el.items?.[0]) {
+                    const itemKeys = Object.keys(el.items[0]?.item ?? {}).filter(k => el.items[0].item[k] !== null);
+                    log.info(`Element[${i}] item[0] non-null keys: ${JSON.stringify(itemKeys)}`);
+                    log.info(`Element[${i}] item[0] (800 chars): ${JSON.stringify(el.items[0]).slice(0, 800)}`);
                 }
             }
-            // Log full included array
-            log.info(`Included total: ${data?.included?.length}`);
-            // Log full response size
-            const fullJson = JSON.stringify(data);
-            log.info(`Full response size: ${fullJson.length} chars`);
+            log.info(`Full response size: ${JSON.stringify(data).length} chars`);
 
             if (data?.status === 401 || data?.message?.toLowerCase().includes('auth')) {
                 throw new Error(
