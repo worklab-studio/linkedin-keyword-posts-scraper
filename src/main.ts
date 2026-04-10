@@ -1,5 +1,5 @@
 import { Actor } from 'apify';
-import { HttpCrawler, PlaywrightCrawler, Dataset, log } from 'crawlee';
+import { HttpCrawler, Dataset, log } from 'crawlee';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -10,7 +10,6 @@ interface Input {
     to?: string;
     limit?: number;
     li_at: string;
-    use_playwright?: boolean;
     proxy?: {
         useApifyProxy?: boolean;
         apifyProxyGroups?: string[];
@@ -27,7 +26,6 @@ interface PostResult {
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 
-// Maps our presets to LinkedIn Voyager's datePosted filter values
 const LINKEDIN_DATE_FILTER_MAP: Record<string, string> = {
     'last-1-day': 'past-24h',
     'last-3-days': 'past-week',
@@ -78,14 +76,6 @@ function buildVoyagerUrl(keyword: string, start: number = 0, dateFilter: string 
     });
 
     return `https://www.linkedin.com/voyager/api/search/blended?${params.toString()}`;
-}
-
-function buildLinkedInSearchUrl(keyword: string, dateFilter: string = ''): string {
-    let url = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&origin=GLOBAL_SEARCH_HEADER&sortBy=date`;
-    if (dateFilter) {
-        url += `&datePosted=${encodeURIComponent(dateFilter)}`;
-    }
-    return url;
 }
 
 // Generate a consistent random JSESSIONID for the run
@@ -196,15 +186,52 @@ function buildRequests(keywords: string[], limit: number, li_at: string, dateFil
     return requests;
 }
 
-// ─── HTTP Crawler (fast, API-based) ──────────────────────────────────────────
+// ─── Main ─────────────────────────────────────────────────────────────────────
 
-async function runHttpCrawler(
-    input: Input,
-    keywordCounts: Record<string, number>,
-    seenUrls: Set<string>,
-    proxyConfiguration: any,
-    dateFilter: string,
-) {
+await Actor.main(async () => {
+    const input = (await Actor.getInput<Input>())!;
+
+    if (!input?.keywords?.length) {
+        throw new Error('Input must include at least one keyword.');
+    }
+    if (!input?.li_at) {
+        throw new Error(
+            'LinkedIn li_at cookie is required. Find it in DevTools > Application > Cookies > linkedin.com > li_at',
+        );
+    }
+
+    const limit = input.limit ?? 50;
+    const dateFilter = resolveLinkedInDateFilter(input);
+
+    log.info('='.repeat(60));
+    log.info('LinkedIn Keyword Posts Scraper');
+    log.info(`Keywords: ${input.keywords.join(', ')}`);
+    log.info(`Limit per keyword: ${limit}`);
+    log.info(`Date filter: ${dateFilter || 'none (all time)'}`);
+    log.info('='.repeat(60));
+
+    // Proxy configuration
+    let proxyConfiguration: any = undefined;
+    if (input.proxy?.useApifyProxy) {
+        proxyConfiguration = await Actor.createProxyConfiguration({
+            groups: input.proxy.apifyProxyGroups ?? ['RESIDENTIAL'],
+        });
+        log.info('Using Apify Residential proxies');
+    } else if (input.proxy?.proxyUrls?.length) {
+        proxyConfiguration = await Actor.createProxyConfiguration({
+            proxyUrls: input.proxy.proxyUrls,
+        });
+        log.info(`Using ${input.proxy.proxyUrls.length} custom proxy URL(s)`);
+    } else {
+        log.warning('No proxy configured — LinkedIn may rate limit or block requests at scale');
+    }
+
+    // Per-keyword result tracking + deduplication
+    const keywordCounts: Record<string, number> = {};
+    for (const kw of input.keywords) keywordCounts[kw] = 0;
+    const seenUrls = new Set<string>();
+
+    // Run crawler
     const crawler = new HttpCrawler({
         proxyConfiguration,
         maxRequestRetries: 3,
@@ -235,11 +262,11 @@ async function runHttpCrawler(
 
             const posts = extractPostsFromVoyagerResponse(data, keyword);
             log.info(
-                `[HTTP] Keyword "${keyword}" page ${request.userData.page} — got ${posts.length} posts`,
+                `Keyword "${keyword}" page ${request.userData.page} — got ${posts.length} posts`,
             );
 
             if (posts.length === 0) {
-                log.info(`[HTTP] No more results for "${keyword}" — stopping pagination`);
+                log.info(`No more results for "${keyword}" — stopping pagination`);
                 return;
             }
 
@@ -257,179 +284,8 @@ async function runHttpCrawler(
         },
     });
 
-    const requests = buildRequests(input.keywords, input.limit ?? 50, input.li_at, dateFilter);
+    const requests = buildRequests(input.keywords, limit, input.li_at, dateFilter);
     await crawler.run(requests);
-}
-
-// ─── Playwright Crawler (browser-based fallback) ──────────────────────────────
-
-async function runPlaywrightCrawler(
-    input: Input,
-    keywordCounts: Record<string, number>,
-    seenUrls: Set<string>,
-    proxyConfiguration: any,
-    dateFilter: string,
-) {
-    const crawler = new PlaywrightCrawler({
-        proxyConfiguration,
-        maxRequestRetries: 2,
-        requestHandlerTimeoutSecs: 60,
-        maxConcurrency: 1,
-        launchContext: {
-            launchOptions: {
-                headless: true,
-            },
-        },
-
-        async requestHandler({ request, page }) {
-            const { keyword } = request.userData as { keyword: string; limit: number };
-            const kwLimit = input.limit ?? 50;
-
-            log.info(`[Playwright] Searching for keyword: "${keyword}"`);
-
-            // Set LinkedIn cookie
-            await page.context().addCookies([
-                {
-                    name: 'li_at',
-                    value: input.li_at,
-                    domain: '.linkedin.com',
-                    path: '/',
-                    httpOnly: true,
-                    secure: true,
-                },
-            ]);
-
-            await page.goto(buildLinkedInSearchUrl(keyword, dateFilter), {
-                waitUntil: 'networkidle',
-                timeout: 30000,
-            });
-
-            // Check if logged in
-            const isLoggedIn = await page.$('.search-results-container, .search-no-results__container');
-            if (!isLoggedIn) {
-                log.warning('LinkedIn login check failed — li_at cookie may be expired');
-                return;
-            }
-
-            const now = new Date().toISOString();
-            let collected = 0;
-
-            while (collected < kwLimit) {
-                // Extract post links from current page
-                const postLinks = await page.$$eval(
-                    'a[href*="/feed/update/"], a[href*="/posts/"]',
-                    (links) =>
-                        links
-                            .map((a) => (a as HTMLAnchorElement).href)
-                            .filter(
-                                (href) =>
-                                    href.includes('/feed/update/') || href.includes('/posts/'),
-                            ),
-                );
-
-                // Extract author names
-                const authorElements = await page.$$eval(
-                    '.update-components-actor__name, .entity-result__title-text a, .app-aware-link span[aria-hidden="true"]',
-                    (els) => els.map((el) => el.textContent?.trim() ?? 'Unknown'),
-                );
-
-                for (let i = 0; i < postLinks.length; i++) {
-                    if (collected >= kwLimit) break;
-                    const postUrl = postLinks[i];
-                    if (!postUrl || seenUrls.has(postUrl)) continue;
-                    seenUrls.add(postUrl);
-
-                    await Dataset.pushData({
-                        author_name: authorElements[i] ?? 'Unknown',
-                        keyword,
-                        post_url: postUrl,
-                        scraped_at: now,
-                    } as PostResult);
-
-                    keywordCounts[keyword]++;
-                    collected++;
-                }
-
-                // Scroll to load more
-                const prevCount = postLinks.length;
-                await page.evaluate(() => window.scrollBy(0, window.innerHeight * 3));
-                await page.waitForTimeout(2000);
-
-                const newLinks = await page.$$('a[href*="/feed/update/"], a[href*="/posts/"]');
-                if (newLinks.length === prevCount) break; // No new content
-            }
-
-            log.info(`[Playwright] Keyword "${keyword}" — scraped ${collected} posts`);
-        },
-
-        failedRequestHandler({ request, error }) {
-            log.error(`Playwright request failed: ${request.url} — ${(error as Error).message}`);
-        },
-    });
-
-    // One request per keyword for Playwright (it scrolls internally)
-    const requests = input.keywords.map((keyword) => ({
-        url: buildLinkedInSearchUrl(keyword, dateFilter),
-        userData: { keyword, limit: input.limit ?? 50 },
-    }));
-
-    await crawler.run(requests);
-}
-
-// ─── Main ─────────────────────────────────────────────────────────────────────
-
-await Actor.main(async () => {
-    const input = (await Actor.getInput<Input>())!;
-
-    // Validate inputs
-    if (!input?.keywords?.length) {
-        throw new Error('Input must include at least one keyword.');
-    }
-    if (!input?.li_at) {
-        throw new Error(
-            'LinkedIn li_at cookie is required. Find it in DevTools > Application > Cookies > linkedin.com > li_at',
-        );
-    }
-
-    const limit = input.limit ?? 50;
-    const usePlaywright = input.use_playwright ?? false;
-    const dateFilter = resolveLinkedInDateFilter(input);
-
-    log.info('='.repeat(60));
-    log.info('LinkedIn Keyword Posts Scraper');
-    log.info(`Keywords: ${input.keywords.join(', ')}`);
-    log.info(`Limit per keyword: ${limit}`);
-    log.info(`Mode: ${usePlaywright ? 'Playwright (browser)' : 'HTTP (Voyager API)'}`);
-    log.info(`Date filter: ${dateFilter || 'none (all time)'}`);
-    log.info('='.repeat(60));
-
-    // Proxy configuration
-    let proxyConfiguration: any = undefined;
-    if (input.proxy?.useApifyProxy) {
-        proxyConfiguration = await Actor.createProxyConfiguration({
-            groups: input.proxy.apifyProxyGroups ?? ['RESIDENTIAL'],
-        });
-        log.info('Using Apify Residential proxies');
-    } else if (input.proxy?.proxyUrls?.length) {
-        proxyConfiguration = await Actor.createProxyConfiguration({
-            proxyUrls: input.proxy.proxyUrls,
-        });
-        log.info(`Using ${input.proxy.proxyUrls.length} custom proxy URL(s)`);
-    } else {
-        log.warning('No proxy configured — LinkedIn may rate limit or block requests at scale');
-    }
-
-    // Per-keyword result tracking + deduplication
-    const keywordCounts: Record<string, number> = {};
-    for (const kw of input.keywords) keywordCounts[kw] = 0;
-    const seenUrls = new Set<string>();
-
-    // Run the appropriate crawler
-    if (usePlaywright) {
-        await runPlaywrightCrawler(input, keywordCounts, seenUrls, proxyConfiguration, dateFilter);
-    } else {
-        await runHttpCrawler(input, keywordCounts, seenUrls, proxyConfiguration, dateFilter);
-    }
 
     // Final summary
     const total = Object.values(keywordCounts).reduce((a, b) => a + b, 0);
@@ -444,7 +300,6 @@ await Actor.main(async () => {
     await Actor.setValue('OUTPUT_SUMMARY', {
         total_posts: total,
         keywords: keywordCounts,
-        mode: usePlaywright ? 'playwright' : 'http',
         completed_at: new Date().toISOString(),
     });
 });

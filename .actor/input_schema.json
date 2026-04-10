@@ -71,12 +71,6 @@
             "editor": "textfield",
             "isSecret": true
         },
-        "use_playwright": {
-            "title": "Use Playwright (browser mode)",
-            "type": "boolean",
-            "description": "Use a real browser instead of the HTTP API. Slower but more resilient to rate limiting.",
-            "default": false
-        },
         "proxy": {
             "title": "Proxy configuration",
             "type": "object",
