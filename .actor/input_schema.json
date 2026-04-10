@@ -1,83 +1,30 @@
 {
-    "title": "LinkedIn Keyword Posts Scraper",
+    "title": "LinkedIn Posts Scraper",
     "type": "object",
     "schemaVersion": 1,
     "properties": {
-        "keywords": {
-            "title": "Keywords",
+        "urls": {
+            "title": "LinkedIn Company or Profile URLs",
             "type": "array",
-            "description": "List of keywords to search LinkedIn posts for.",
+            "description": "LinkedIn company or profile URLs to scrape posts from. E.g. https://www.linkedin.com/company/google/ or https://www.linkedin.com/in/satyanadella/",
             "editor": "stringList",
-            "prefill": ["product design", "AI tools"]
-        },
-        "date": {
-            "title": "Date Range (preset)",
-            "type": "string",
-            "description": "Predefined date range filter. If set and not 'ignore', takes precedence over from/to.",
-            "editor": "select",
-            "enum": [
-                "ignore",
-                "last-1-day",
-                "last-3-days",
-                "last-1-week",
-                "last-2-weeks",
-                "last-1-month",
-                "last-2-months",
-                "last-3-months",
-                "last-6-months",
-                "last-1-year"
-            ],
-            "enumTitles": [
-                "Ignore (use from/to)",
-                "Last 1 day",
-                "Last 3 days",
-                "Last 1 week",
-                "Last 2 weeks",
-                "Last 1 month",
-                "Last 2 months",
-                "Last 3 months",
-                "Last 6 months",
-                "Last 1 year"
-            ],
-            "default": "last-3-months"
-        },
-        "from": {
-            "title": "From date",
-            "type": "string",
-            "description": "Start date (YYYY-MM-DD). Only used when date is 'ignore' or not set.",
-            "editor": "textfield",
-            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
-        },
-        "to": {
-            "title": "To date",
-            "type": "string",
-            "description": "End date (YYYY-MM-DD). Only used when date is 'ignore' or not set.",
-            "editor": "textfield",
-            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+            "prefill": ["https://www.linkedin.com/company/google/", "https://www.linkedin.com/company/microsoft/"]
         },
         "limit": {
-            "title": "Result limit per keyword",
+            "title": "Posts per URL",
             "type": "integer",
-            "description": "Maximum number of posts to scrape per keyword.",
+            "description": "Maximum number of posts to scrape per URL.",
             "editor": "number",
-            "default": 50,
+            "default": 20,
             "minimum": 1,
-            "maximum": 500
-        },
-        "li_at": {
-            "title": "LinkedIn li_at cookie",
-            "type": "string",
-            "description": "Your LinkedIn session cookie. Find it in DevTools > Application > Cookies > linkedin.com.",
-            "editor": "textfield",
-            "isSecret": true
+            "maximum": 200
         },
         "proxy": {
             "title": "Proxy configuration",
             "type": "object",
-            "description": "Proxy settings. Recommended: use Apify Residential proxies.",
-            "editor": "proxy",
-            "prefill": { "useApifyProxy": true, "apifyProxyGroups": ["RESIDENTIAL"] }
+            "description": "Optional. Try without proxy first — company pages are public.",
+            "editor": "proxy"
         }
     },
-    "required": ["keywords", "li_at"]
+    "required": ["urls"]
 }

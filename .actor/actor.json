@@ -1,8 +1,8 @@
 {
     "actorSpecification": 1,
-    "name": "linkedin-keyword-posts-scraper",
-    "title": "LinkedIn Keyword Posts URL Scraper",
-    "description": "Scrapes LinkedIn post URLs by keyword with date filters. Returns author name, keyword, and post URL.",
+    "name": "linkedin-posts-scraper",
+    "title": "LinkedIn Posts Scraper",
+    "description": "Scrape posts from LinkedIn company and profile pages. Get post text, reactions, comments, reposts, images, and author info. No cookies needed.",
     "version": "1.0",
     "buildTag": "latest",
     "environmentVariables": {},
@@ -15,17 +15,18 @@
                 "overview": {
                     "title": "Results",
                     "transformation": {
-                        "fields": ["author_name", "keyword", "post_url", "post_text", "reactions", "comments", "scraped_at"]
+                        "fields": ["author_name", "post_url", "post_text", "reactions", "comments", "reposts", "posted_ago", "scraped_at"]
                     },
                     "display": {
                         "component": "table",
                         "properties": {
                             "author_name": { "label": "Author", "format": "text" },
-                            "keyword": { "label": "Keyword", "format": "text" },
                             "post_url": { "label": "Post URL", "format": "link" },
                             "post_text": { "label": "Post Text", "format": "text" },
                             "reactions": { "label": "Reactions", "format": "number" },
                             "comments": { "label": "Comments", "format": "number" },
+                            "reposts": { "label": "Reposts", "format": "number" },
+                            "posted_ago": { "label": "Posted", "format": "text" },
                             "scraped_at": { "label": "Scraped At", "format": "datetime" }
                         }
                     }
