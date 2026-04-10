@@ -201,7 +201,7 @@ await Actor.main(async () => {
             let noNewResults = 0;
 
             while (collected < limit && noNewResults < 3) {
-                // Extract posts from DOM — LinkedIn uses role="listitem" for each post
+                // Extract posts from DOM + activity URNs from HTML
                 const posts = await page.evaluate(() => {
                     const results: { url: string; author: string; reactions: number; comments: number }[] = [];
 
@@ -214,32 +214,35 @@ await Actor.main(async () => {
                         return isNaN(num) ? 0 : num;
                     }
 
+                    // Extract activity URNs from page HTML for post URLs
+                    const html = document.documentElement.innerHTML;
+                    const urnMatches = [...html.matchAll(/urn:li:(activity|ugcPost):(\d+)/g)];
+                    const activityUrns = [...new Set(urnMatches.map(m => m[0]))];
+
                     const postContainers = document.querySelectorAll('[role="listitem"]');
+                    let urnIndex = 0;
 
                     for (const container of postContainers) {
                         // Find profile link (author URL)
                         const profileLink = container.querySelector('a[href*="/in/"], a[href*="/company/"]') as HTMLAnchorElement;
                         if (!profileLink) continue;
-                        const profileUrl = profileLink.href.split('?')[0];
 
-                        // Author name from aria-label
+                        // Author name from "Open control menu for post by X" button
                         let author = 'Unknown';
-                        const authorEl = container.querySelector('[aria-label*="post by"]');
-                        if (authorEl) {
-                            const label = authorEl.getAttribute('aria-label') ?? '';
-                            // "Open control menu for post by Palak Sharma"
+                        const menuBtn = container.querySelector('[aria-label*="post by"]');
+                        if (menuBtn) {
+                            const label = menuBtn.getAttribute('aria-label') ?? '';
                             const match = label.match(/post by (.+)/i);
                             if (match) author = match[1].trim();
                         }
                         if (author === 'Unknown') {
-                            // Fallback: first bold name text in the container
                             const nameP = container.querySelector('p');
                             if (nameP?.textContent?.trim() && nameP.textContent.trim().length < 50) {
                                 author = nameP.textContent.trim();
                             }
                         }
 
-                        // Reactions from screen-reader span
+                        // Reactions and comments from screen-reader spans
                         let reactions = 0;
                         let comments = 0;
                         const srSpans = container.querySelectorAll('span');
@@ -252,7 +255,21 @@ await Actor.main(async () => {
                             }
                         }
 
-                        results.push({ url: profileUrl, author, reactions, comments });
+                        // Match post URL from activity URNs (in order)
+                        let postUrl = profileLink.href.split('?')[0];
+                        // Try to find a matching URN from the container's inner HTML
+                        const containerHtml = container.innerHTML;
+                        const containerUrn = containerHtml.match(/urn:li:(activity|ugcPost):(\d+)/);
+                        if (containerUrn) {
+                            const [fullUrn] = containerUrn;
+                            postUrl = `https://www.linkedin.com/feed/update/${fullUrn}/`;
+                        } else if (urnIndex < activityUrns.length) {
+                            // Fallback: use URNs in order
+                            postUrl = `https://www.linkedin.com/feed/update/${activityUrns[urnIndex]}/`;
+                            urnIndex++;
+                        }
+
+                        results.push({ url: postUrl, author, reactions, comments });
                     }
 
                     return results;
