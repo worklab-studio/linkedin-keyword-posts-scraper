@@ -197,7 +197,7 @@ async function scrollForPosts(page: Page, limit: number): Promise<any[]> {
 
 async function triggerLazyLoad(page: Page): Promise<void> {
     await page.evaluate(() => {
-        const h = document.documentElement.scrollHeight;
+        const h = document.documentElement?.scrollHeight || 5000;
         const steps = 8;
         const step = Math.min(h / steps, 400);
         for (let i = 1; i <= steps; i++) {
@@ -281,6 +281,8 @@ await Actor.main(async () => {
                 log.warning('  Navigation slow, continuing...');
             }
             await page.waitForTimeout(5000);
+
+            log.info(`  Current URL: ${page.url()}`);
 
             // Check for login wall
             if (page.url().includes('/login') || page.url().includes('/authwall')) {
