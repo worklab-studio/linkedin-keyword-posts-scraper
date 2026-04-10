@@ -255,6 +255,31 @@ await Actor.main(async () => {
                 return;
             }
 
+            // Debug: log response structure
+            const topKeys = Object.keys(data ?? {}).slice(0, 10);
+            log.info(`Response keys for "${keyword}": ${JSON.stringify(topKeys)}`);
+            if (data?.elements) {
+                log.info(`Elements count: ${data.elements.length}`);
+                if (data.elements[0]) {
+                    log.info(`First element keys: ${JSON.stringify(Object.keys(data.elements[0]))}`);
+                    if (data.elements[0]?.items) {
+                        log.info(`First element items count: ${data.elements[0].items.length}`);
+                        if (data.elements[0].items[0]) {
+                            log.info(`First item: ${JSON.stringify(data.elements[0].items[0]).slice(0, 500)}`);
+                        }
+                    }
+                }
+            } else if (data?.included) {
+                log.info(`Included count: ${data.included.length}`);
+                const types = [...new Set(data.included.map((i: any) => i.$type).filter(Boolean))];
+                log.info(`Included types: ${JSON.stringify(types)}`);
+                if (data.included[0]) {
+                    log.info(`First included: ${JSON.stringify(data.included[0]).slice(0, 500)}`);
+                }
+            } else {
+                log.info(`Full response (first 1000 chars): ${JSON.stringify(data).slice(0, 1000)}`);
+            }
+
             if (data?.status === 401 || data?.message?.toLowerCase().includes('auth')) {
                 throw new Error(
                     'LinkedIn authentication failed. Your li_at cookie may be expired. Please refresh it.',
