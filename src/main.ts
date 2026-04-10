@@ -196,6 +196,14 @@ await Actor.main(async () => {
             const linkedinMentions = (html.match(/linkedin\.com/g) || []).length;
             log.info(`LinkedIn mentions in HTML: ${linkedinMentions}`);
 
+            // Log first 1000 chars to understand what Google returned
+            log.info(`HTML sample: ${html.slice(0, 1000)}`);
+
+            // Check for Google consent page
+            if (html.includes('consent.google') || html.includes('Before you continue')) {
+                log.warning('Google consent page detected — need to handle cookies');
+            }
+
             const urls = extractLinkedInUrls(html);
             log.info(`Google: "${keyword}" → ${urls.length} post URLs`);
 
