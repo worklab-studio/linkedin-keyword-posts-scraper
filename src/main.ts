@@ -145,7 +145,7 @@ await Actor.main(async () => {
     // Warm up session — visit a lightweight LinkedIn page first
     log.info('Warming up LinkedIn session...');
     try {
-        await page.goto('https://www.linkedin.com/', { waitUntil: 'commit', timeout: 15000 });
+        await page.goto('https://www.linkedin.com/check/ring/dashboard', { waitUntil: 'commit', timeout: 15000 });
     } catch {
         // Even if it times out, cookies are set and session may be established
         log.info('Warmup page slow, continuing anyway...');
