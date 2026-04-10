@@ -64,13 +64,20 @@
             "minimum": 1,
             "maximum": 500
         },
+        "li_at": {
+            "title": "LinkedIn li_at cookie",
+            "type": "string",
+            "description": "Your LinkedIn session cookie. Find it in DevTools > Application > Cookies > linkedin.com.",
+            "editor": "textfield",
+            "isSecret": true
+        },
         "proxy": {
             "title": "Proxy configuration",
             "type": "object",
-            "description": "Proxy settings. Recommended: use Apify GOOGLE_SERP proxies for best results.",
+            "description": "Proxy settings. Recommended: use Apify Residential proxies.",
             "editor": "proxy",
             "prefill": { "useApifyProxy": true, "apifyProxyGroups": ["RESIDENTIAL"] }
         }
     },
-    "required": ["keywords"]
+    "required": ["keywords", "li_at"]
 }
