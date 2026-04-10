@@ -275,8 +275,12 @@ await Actor.main(async () => {
         log.info(`Scraping: ${url}`);
 
         try {
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
-            await page.waitForTimeout(3000);
+            try {
+                await page.goto(url, { waitUntil: 'commit', timeout: 90000 });
+            } catch {
+                log.warning('  Navigation slow, continuing...');
+            }
+            await page.waitForTimeout(5000);
 
             // Check for login wall
             if (page.url().includes('/login') || page.url().includes('/authwall')) {
