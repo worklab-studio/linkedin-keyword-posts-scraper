@@ -65,7 +65,7 @@ function buildVoyagerUrl(keyword: string, start: number = 0, dateFilter: string 
         : 'List(resultType->CONTENT)';
 
     const params = new URLSearchParams({
-        decorationId: 'com.linkedin.voyager.deco.search.SearchClusterCollection-175',
+        decorationId: 'com.linkedin.voyager.deco.content.SearchClusterCollection-198',
         count: '10',
         filters,
         keywords: keyword,
@@ -75,7 +75,7 @@ function buildVoyagerUrl(keyword: string, start: number = 0, dateFilter: string 
         start: String(start),
     });
 
-    return `https://www.linkedin.com/voyager/api/search/blended?${params.toString()}`;
+    return `https://www.linkedin.com/voyager/api/search/dash/clusters?${params.toString()}`;
 }
 
 // Generate a consistent random JSESSIONID for the run
