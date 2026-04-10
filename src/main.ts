@@ -81,8 +81,8 @@ await Actor.main(async () => {
     // ── Step 1: Playwright scrolls LinkedIn search, captures URNs ──
     log.info('Step 1: Scrolling LinkedIn search pages to collect post URNs...');
 
+    // Don't use proxy for LinkedIn — proxy causes empty/blocked responses
     const launchOptions: any = { headless: true, args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'] };
-    if (proxyUrl) launchOptions.proxy = { server: proxyUrl };
 
     const browser = await chromium.launch(launchOptions);
     const context = await browser.newContext({
