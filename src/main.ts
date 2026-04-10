@@ -158,18 +158,20 @@ await Actor.main(async () => {
             };
             page.on('response', responseHandler);
 
-            await page.goto(buildSearchUrl(keyword, dateFilter), { waitUntil: 'domcontentloaded', timeout: 60000 });
-
-            // Wait for actual post content to render
             try {
-                await page.waitForSelector('[role="listitem"]', { timeout: 15000 });
-                log.info('Posts rendered');
+                await page.goto(buildSearchUrl(keyword, dateFilter), { waitUntil: 'commit', timeout: 30000 });
             } catch {
-                log.warning('No posts found after 15s, trying longer wait...');
-                await page.waitForTimeout(8000);
+                log.warning(`Navigation slow for "${keyword}", continuing...`);
             }
 
-            // Extra wait for API responses to complete
+            // Wait for posts to render
+            try {
+                await page.waitForSelector('[role="listitem"]', { timeout: 20000 });
+                log.info('Posts rendered');
+            } catch {
+                log.warning('No listitem found, waiting more...');
+                await page.waitForTimeout(10000);
+            }
             await page.waitForTimeout(3000);
 
             log.info(`Page loaded, intercepted ${apiData.length} API items`);
