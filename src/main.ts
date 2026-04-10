@@ -57,9 +57,9 @@ function resolveLinkedInDateFilter(input: Input): string {
 // ─── URL builder ──────────────────────────────────────────────────────────────
 
 function buildSearchUrl(keyword: string, dateFilter: string): string {
-    let url = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&origin=GLOBAL_SEARCH_HEADER&sortBy=%22date_posted%22`;
+    let url = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&origin=FACETED_SEARCH&sortBy=%5B%22date_posted%22%5D`;
     if (dateFilter) {
-        url += `&datePosted=%22${dateFilter}%22`;
+        url += `&datePosted=%5B%22${dateFilter}%22%5D`;
     }
     return url;
 }
