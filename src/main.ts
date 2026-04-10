@@ -1,6 +1,5 @@
 import { Actor } from 'apify';
-import { Dataset, log } from 'crawlee';
-import { chromium, Page } from 'playwright';
+import { Dataset, log, CheerioCrawler } from 'crawlee';
 
 interface Input {
     urls: string[];
@@ -11,235 +10,42 @@ interface Input {
     };
 }
 
-// ─── Browser warmup (appear human) ──────────────────────────────────────────
-
-async function warmUpBrowser(page: Page): Promise<void> {
-    const sites = ['https://www.google.com', 'https://www.wikipedia.org'];
-    for (const site of sites) {
-        try {
-            await page.goto(site, { waitUntil: 'domcontentloaded', timeout: 8000 });
-            await page.waitForTimeout(1000);
-        } catch { /* ok */ }
-    }
-    log.info('Browser warmed up');
-}
-
-// ─── Build posts URL ────────────────────────────────────────────────────────
-
 function buildPostsUrl(url: string): string {
     url = url.split('?')[0].replace(/\/+$/, '');
     if (!url.includes('/posts')) url += '/posts/';
     return url;
 }
 
-// ─── Extract posts from page ────────────────────────────────────────────────
-
-async function extractPostsFromPage(page: Page): Promise<any[]> {
-    return page.evaluate(() => {
-        const posts: any[] = [];
-        const html = document.body?.innerHTML || '';
-        if (!html) return posts;
-        const seenUrns = new Set<string>();
-
-        function parseCount(text: string): number {
-            if (!text) return 0;
-            const cleaned = text.trim().toLowerCase().replace(/,/g, '');
-            if (cleaned.includes('k')) return Math.round(parseFloat(cleaned) * 1000);
-            if (cleaned.includes('m')) return Math.round(parseFloat(cleaned) * 1000000);
-            return parseInt(cleaned, 10) || 0;
-        }
-
-        // Find all activity URNs in the page
-        const urnMatches = html.matchAll(/urn:li:activity:(\d+)/g);
-
-        for (const match of urnMatches) {
-            const urn = match[0];
-            if (seenUrns.has(urn)) continue;
-            seenUrns.add(urn);
-
-            // Find element with this URN via data-urn attribute
-            const el = document.querySelector(`[data-urn="${urn}"]`);
-            if (!el) continue;
-
-            // Extract post text
-            let text = '';
-            const textSelectors = [
-                '.feed-shared-update-v2__description',
-                '.update-components-text',
-                '.feed-shared-text',
-                '[data-test-id="main-feed-activity-card__commentary"]',
-                '.break-words',
-            ];
-            for (const sel of textSelectors) {
-                const textEl = el.querySelector(sel);
-                if (textEl) {
-                    const t = (textEl as HTMLElement).innerText?.trim() || '';
-                    if (t.length > text.length && t.length > 20) text = t;
-                }
-            }
-
-            // Fallback: find largest text block
-            if (!text || text.length < 30) {
-                const allDivs = el.querySelectorAll('div, span');
-                let maxLen = 0;
-                allDivs.forEach(div => {
-                    const t = (div as HTMLElement).innerText?.trim() || '';
-                    if (t.length > maxLen && t.length > 50
-                        && !t.includes('followers')
-                        && !t.includes('reactions')) {
-                        text = t;
-                        maxLen = t.length;
-                    }
-                });
-            }
-
-            if (!text || text.length < 20) continue;
-
-            // Time posted
-            const timeEl = el.querySelector('[class*="actor__sub-description"]');
-            const timeText = timeEl ? (timeEl as HTMLElement).innerText : '';
-            let postedAgo = '';
-            const timeMatch = timeText.match(/(\d+[hdwmy]|\d+\s*(?:hour|day|week|month|year)s?\s*ago)/i);
-            if (timeMatch) postedAgo = timeMatch[1].trim();
-
-            // Author name
-            let authorName = '';
-            const authorEl = el.querySelector('[class*="actor__name"] span, [class*="actor__title"] span');
-            if (authorEl) authorName = (authorEl as HTMLElement).innerText?.trim() || '';
-            if (!authorName) {
-                const ariaLabel = el.querySelector('[aria-label*="post by"]');
-                if (ariaLabel) {
-                    const m = ariaLabel.getAttribute('aria-label')?.match(/post by (.+)/i);
-                    if (m) authorName = m[1].trim();
-                }
-            }
-
-            // Reactions
-            const reactionsEl = el.querySelector('[class*="social-counts__reactions"], button[aria-label*="reaction"]');
-            const reactionsText = reactionsEl ? (reactionsEl as HTMLElement).innerText : '';
-            const reactions = parseCount(reactionsText);
-
-            // Comments
-            const commentsEl = el.querySelector('button[aria-label*="comment"]');
-            const commentsText = commentsEl ? (commentsEl as HTMLElement).innerText : '';
-            const comments = parseCount(commentsText);
-
-            // Reposts
-            const repostsEl = el.querySelector('button[aria-label*="repost"]');
-            const repostsText = repostsEl ? (repostsEl as HTMLElement).innerText : '';
-            const reposts = parseCount(repostsText);
-
-            // Images
-            const images: string[] = [];
-            el.querySelectorAll('img[src*="media"]').forEach(img => {
-                const src = (img as HTMLImageElement).src;
-                if (src && !src.includes('profile') && !src.includes('logo')) images.push(src);
-            });
-
-            posts.push({
-                urn,
-                text: text.substring(0, 2000),
-                authorName,
-                postedAgo,
-                reactions,
-                comments,
-                reposts,
-                images,
-            });
-        }
-
-        return posts;
-    });
+function extractUrns(html: string): string[] {
+    const seen = new Set<string>();
+    const regex = /urn:li:(activity|ugcPost):(\d+)/g;
+    let m;
+    while ((m = regex.exec(html)) !== null) seen.add(m[0]);
+    return [...seen];
 }
 
-// ─── Scroll for more posts ──────────────────────────────────────────────────
+function parsePostPage(html: string): { author: string; text: string; reactions: number; comments: number } {
+    let author = 'Unknown', text = '', reactions = 0, comments = 0;
 
-async function scrollForPosts(page: Page, limit: number): Promise<any[]> {
-    const allPosts: any[] = [];
-    const seenUrns = new Set<string>();
-    let emptyScrolls = 0;
-    let scrollCount = 0;
-    const maxScrolls = Math.min(Math.ceil(limit / 3) + 2, 30);
-
-    // Initial extraction
-    const initial = await extractPostsFromPage(page);
-    for (const p of initial) {
-        if (!seenUrns.has(p.urn)) { seenUrns.add(p.urn); allPosts.push(p); }
-    }
-    log.info(`  Initial: ${allPosts.length} posts`);
-
-    while (allPosts.length < limit && scrollCount < maxScrolls && emptyScrolls < 3) {
-        const prevCount = allPosts.length;
-
-        // Scroll down
-        await page.keyboard.press('End');
-        await page.waitForTimeout(2500);
-
-        // Extract new posts
-        const newPosts = await extractPostsFromPage(page);
-        for (const p of newPosts) {
-            if (!seenUrns.has(p.urn)) { seenUrns.add(p.urn); allPosts.push(p); }
-        }
-
-        scrollCount++;
-        if (allPosts.length === prevCount) {
-            emptyScrolls++;
-            log.info(`  Scroll ${scrollCount}: no new (${emptyScrolls}/3)`);
-        } else {
-            emptyScrolls = 0;
-            log.info(`  Scroll ${scrollCount}: ${allPosts.length} posts total`);
-        }
+    const ogTitle = html.match(/<meta[^>]*property="og:title"[^>]*content="([^"]+)"/i)
+        ?? html.match(/<meta[^>]*content="([^"]+)"[^>]*property="og:title"/i);
+    if (ogTitle) {
+        const parts = ogTitle[1].split(/\s+on\s+LinkedIn/i);
+        if (parts[0]) author = parts[0].trim().replace(/&amp;/g, '&');
     }
 
-    return allPosts.slice(0, limit);
+    const ogDesc = html.match(/<meta[^>]*property="og:description"[^>]*content="([^"]+)"/i)
+        ?? html.match(/<meta[^>]*content="([^"]+)"[^>]*property="og:description"/i);
+    if (ogDesc) text = ogDesc[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').trim();
+
+    const rm = html.match(/(\d[\d,]*)\s*(?:reactions?|likes?)/i);
+    if (rm) reactions = parseInt(rm[1].replace(/,/g, ''), 10) || 0;
+
+    const cm = html.match(/(\d[\d,]*)\s*comments?/i);
+    if (cm) comments = parseInt(cm[1].replace(/,/g, ''), 10) || 0;
+
+    return { author, text, reactions, comments };
 }
-
-// ─── Trigger lazy load ──────────────────────────────────────────────────────
-
-async function triggerLazyLoad(page: Page): Promise<void> {
-    await page.evaluate(() => {
-        const h = document.documentElement?.scrollHeight || 5000;
-        const steps = 8;
-        const step = Math.min(h / steps, 400);
-        for (let i = 1; i <= steps; i++) {
-            setTimeout(() => window.scrollTo(0, step * i), i * 200);
-        }
-    });
-    await page.waitForTimeout(2500);
-    await page.evaluate(() => window.scrollTo(0, 400));
-    await page.waitForTimeout(1000);
-}
-
-// ─── Wait for posts to appear ───────────────────────────────────────────────
-
-async function waitForPosts(page: Page): Promise<boolean> {
-    // First wait for body to exist
-    try {
-        await page.waitForSelector('body', { timeout: 15000 });
-    } catch {
-        log.warning('  No body element found');
-        return false;
-    }
-
-    for (let attempt = 0; attempt < 5; attempt++) {
-        await triggerLazyLoad(page);
-
-        const hasPosts = await page.evaluate(() =>
-            document.body?.innerHTML?.includes('urn:li:activity:') ?? false
-        );
-
-        if (hasPosts) {
-            log.info('  Posts found');
-            return true;
-        }
-        log.info(`  Waiting for posts... attempt ${attempt + 1}/5`);
-        await page.waitForTimeout(3000);
-    }
-    log.warning('  No posts found after 5 attempts');
-    return false;
-}
-
-// ─── Main ───────────────────────────────────────────────────────────────────
 
 await Actor.main(async () => {
     const input = (await Actor.getInput<Input>())!;
@@ -248,100 +54,107 @@ await Actor.main(async () => {
     const limit = input.limit ?? 20;
 
     log.info('='.repeat(60));
-    log.info('LinkedIn Posts Scraper');
+    log.info('LinkedIn Company Posts Scraper');
     log.info(`URLs: ${input.urls.length}`);
     log.info(`Limit per URL: ${limit}`);
     log.info('='.repeat(60));
 
-    // Launch browser
-    let proxyUrl: string | undefined;
+    let proxyConfiguration: any = undefined;
     if (input.proxy?.useApifyProxy) {
-        const pc = await Actor.createProxyConfiguration({
+        proxyConfiguration = await Actor.createProxyConfiguration({
             groups: input.proxy.apifyProxyGroups ?? ['RESIDENTIAL'],
         });
-        proxyUrl = await pc!.newUrl();
     }
 
-    const launchOptions: any = {
-        headless: true,
-        args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
-    };
-    if (proxyUrl) launchOptions.proxy = { server: proxyUrl };
-
-    const browser = await chromium.launch(launchOptions);
-    const context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        viewport: { width: 1920, height: 1080 },
-    });
-    const page = await context.newPage();
-
-    // Warm up browser
-    await warmUpBrowser(page);
-
-    let totalPosts = 0;
+    // Step 1: Fetch each company/profile posts page to collect URNs
+    log.info('Step 1: Fetching company/profile pages for post URNs...');
+    const allUrns: { urn: string; sourceUrl: string }[] = [];
+    const seenUrns = new Set<string>();
 
     for (const rawUrl of input.urls) {
         const url = buildPostsUrl(rawUrl);
-        log.info(`Scraping: ${url}`);
+        log.info(`Fetching: ${url}`);
 
         try {
-            try {
-                await page.goto(url, { waitUntil: 'commit', timeout: 90000 });
-            } catch {
-                log.warning('  Navigation slow, continuing...');
+            const res = await fetch(url, {
+                headers: {
+                    'accept': 'text/html,application/xhtml+xml',
+                    'accept-language': 'en-US,en;q=0.9',
+                    'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                },
+                redirect: 'follow',
+            });
+            const html = await res.text();
+            log.info(`  Got ${html.length} chars`);
+
+            const urns = extractUrns(html);
+            let newCount = 0;
+            for (const urn of urns) {
+                if (seenUrns.has(urn)) continue;
+                if (allUrns.filter(u => u.sourceUrl === url).length >= limit) break;
+                seenUrns.add(urn);
+                allUrns.push({ urn, sourceUrl: url });
+                newCount++;
             }
-            await page.waitForTimeout(5000);
-
-            log.info(`  Current URL: ${page.url()}`);
-
-            // Check for login wall
-            if (page.url().includes('/login') || page.url().includes('/authwall')) {
-                log.warning(`  Login required for ${url} — this page may not be public. Skipping.`);
-                continue;
-            }
-
-            // Wait for posts
-            const found = await waitForPosts(page);
-            if (!found) {
-                log.warning(`  No posts loaded for ${url}`);
-                continue;
-            }
-
-            // Extract posts with scrolling
-            const posts = await scrollForPosts(page, limit);
-
-            for (const post of posts) {
-                const activityId = post.urn.replace('urn:li:activity:', '');
-                await Dataset.pushData({
-                    post_url: `https://www.linkedin.com/feed/update/urn:li:activity:${activityId}/`,
-                    urn: post.urn,
-                    author_name: post.authorName || 'Unknown',
-                    post_text: post.text,
-                    posted_ago: post.postedAgo,
-                    reactions: post.reactions,
-                    comments: post.comments,
-                    reposts: post.reposts,
-                    images: post.images,
-                    source_url: url,
-                    scraped_at: new Date().toISOString(),
-                });
-                totalPosts++;
-            }
-
-            log.info(`  ✓ ${posts.length} posts scraped from ${url}`);
-
+            log.info(`  Found ${urns.length} URNs, ${newCount} new`);
         } catch (err) {
             log.error(`  Error: ${(err as Error).message.slice(0, 100)}`);
         }
 
-        await page.waitForTimeout(2000 + Math.random() * 3000);
+        await new Promise(r => setTimeout(r, 1500));
     }
 
-    await browser.close();
+    log.info(`Step 1 done: ${allUrns.length} total URNs`);
+
+    // Step 2: Fetch each post's public page for details
+    if (allUrns.length > 0) {
+        log.info('Step 2: Fetching post details...');
+
+        const postRequests = allUrns.map(({ urn, sourceUrl }) => ({
+            url: `https://www.linkedin.com/feed/update/${urn}/`,
+            userData: { sourceUrl },
+        }));
+
+        const crawler = new CheerioCrawler({
+            proxyConfiguration,
+            maxRequestRetries: 2,
+            requestHandlerTimeoutSecs: 30,
+            maxConcurrency: 3,
+            additionalMimeTypes: ['application/octet-stream'],
+
+            async requestHandler({ request, body }) {
+                const { sourceUrl } = request.userData as { sourceUrl: string };
+                const parsed = parsePostPage(body.toString());
+
+                if (parsed.author === 'Sign Up' || parsed.author === 'LinkedIn' || !parsed.text) {
+                    log.info('  ⊘ Skipped private post');
+                    return;
+                }
+
+                log.info(`  ✓ ${parsed.author} | ${parsed.reactions} reactions | ${parsed.comments} comments`);
+
+                await Dataset.pushData({
+                    author_name: parsed.author,
+                    post_url: request.url,
+                    post_text: parsed.text.slice(0, 500),
+                    reactions: parsed.reactions,
+                    comments: parsed.comments,
+                    source_url: sourceUrl,
+                    scraped_at: new Date().toISOString(),
+                });
+            },
+
+            failedRequestHandler({ request, error }) {
+                log.warning(`  Failed: ${request.url.slice(0, 80)} — ${(error as Error).message}`);
+            },
+        });
+
+        await crawler.run(postRequests);
+    }
 
     log.info('='.repeat(60));
-    log.info(`Done. Total: ${totalPosts} posts`);
+    log.info(`Done. Total: ${allUrns.length} URNs collected`);
     log.info('='.repeat(60));
 
-    await Actor.setValue('OUTPUT_SUMMARY', { total_posts: totalPosts, completed_at: new Date().toISOString() });
+    await Actor.setValue('OUTPUT_SUMMARY', { total_posts: allUrns.length, completed_at: new Date().toISOString() });
 });
