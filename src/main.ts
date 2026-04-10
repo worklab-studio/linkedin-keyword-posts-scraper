@@ -246,8 +246,13 @@ await Actor.main(async () => {
                 return;
             }
 
-            // Debug: log response structure
-            const clusters = data?.data?.searchDashClustersByAll;
+            // Debug: find the clusters in the response
+            const clusters =
+                data?.data?.data?.searchDashClustersByAll ??
+                data?.data?.searchDashClustersByAll ??
+                data?.searchDashClustersByAll;
+            // Log which path worked
+            log.info(`Path check: data.data.data=${!!data?.data?.data?.searchDashClustersByAll}, data.data=${!!data?.data?.searchDashClustersByAll}, data=${!!data?.searchDashClustersByAll}`);
             log.info(`Clusters found: ${!!clusters}, totalResultCount: ${clusters?.metadata?.totalResultCount}`);
             log.info(`Elements count: ${clusters?.elements?.length}`);
             // Log ALL elements summaries
