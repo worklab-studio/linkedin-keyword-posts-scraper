@@ -180,9 +180,21 @@ await Actor.main(async () => {
             const { keyword } = request.userData as { keyword: string };
             const html = body.toString();
 
+            log.info(`Google response: ${html.length} chars`);
+
             if (html.includes('detected unusual traffic') || html.includes('CAPTCHA')) {
+                log.warning('Google CAPTCHA detected');
                 throw new Error('Google CAPTCHA');
             }
+
+            // Log a sample to understand what Google returned
+            if (html.length < 5000) {
+                log.info(`Short response — might be blocked: ${html.slice(0, 500)}`);
+            }
+
+            // Log if linkedin.com appears at all
+            const linkedinMentions = (html.match(/linkedin\.com/g) || []).length;
+            log.info(`LinkedIn mentions in HTML: ${linkedinMentions}`);
 
             const urls = extractLinkedInUrls(html);
             log.info(`Google: "${keyword}" → ${urls.length} post URLs`);
