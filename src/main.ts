@@ -249,28 +249,21 @@ await Actor.main(async () => {
             }
 
             // Debug: log response structure
-            const topKeys = Object.keys(data ?? {}).slice(0, 10);
-            log.info(`Response keys for "${keyword}": ${JSON.stringify(topKeys)}`);
-            if (data?.elements) {
-                log.info(`Elements count: ${data.elements.length}`);
-                if (data.elements[0]) {
-                    log.info(`First element keys: ${JSON.stringify(Object.keys(data.elements[0]))}`);
-                    if (data.elements[0]?.items) {
-                        log.info(`First element items count: ${data.elements[0].items.length}`);
-                        if (data.elements[0].items[0]) {
-                            log.info(`First item: ${JSON.stringify(data.elements[0].items[0]).slice(0, 500)}`);
-                        }
-                    }
-                }
-            } else if (data?.included) {
+            log.info(`Response top keys: ${JSON.stringify(Object.keys(data ?? {}))}`);
+            log.info(`data.data keys: ${JSON.stringify(Object.keys(data?.data ?? {}))}`);
+            log.info(`data.data (first 2000 chars): ${JSON.stringify(data?.data).slice(0, 2000)}`);
+            if (data?.included?.length) {
                 log.info(`Included count: ${data.included.length}`);
                 const types = [...new Set(data.included.map((i: any) => i.$type).filter(Boolean))];
                 log.info(`Included types: ${JSON.stringify(types)}`);
-                if (data.included[0]) {
-                    log.info(`First included: ${JSON.stringify(data.included[0]).slice(0, 500)}`);
+                // Log first few included items with activity URNs
+                const activities = data.included.filter((i: any) =>
+                    JSON.stringify(i).includes('activity') || i.$type?.includes('Update') || i.$type?.includes('Post')
+                );
+                log.info(`Activity-related included items: ${activities.length}`);
+                if (activities[0]) {
+                    log.info(`First activity item: ${JSON.stringify(activities[0]).slice(0, 500)}`);
                 }
-            } else {
-                log.info(`Full response (first 1000 chars): ${JSON.stringify(data).slice(0, 1000)}`);
             }
 
             if (data?.status === 401 || data?.message?.toLowerCase().includes('auth')) {
