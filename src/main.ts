@@ -142,29 +142,42 @@ await Actor.main(async () => {
     const seenUrns = new Set<string>();
 
     for (const keyword of input.keywords) {
-        const url = buildSearchUrl(keyword, dateFilter);
-        log.info(`Fetching search for "${keyword}"...`);
+        // Make multiple requests with different sort/filter combos to get more URNs
+        const searchVariants = [
+            { sort: 'date_posted', filter: dateFilter, label: 'date+filter' },
+            { sort: 'relevance', filter: dateFilter, label: 'relevance+filter' },
+            { sort: 'date_posted', filter: '', label: 'date+nofilter' },
+            { sort: 'relevance', filter: '', label: 'relevance+nofilter' },
+        ];
 
-        try {
-            const res = await fetch(url, { headers: getHeaders(input.li_at), redirect: 'follow' });
-            const html = await res.text();
-            log.info(`Got ${html.length} chars for "${keyword}"`);
+        for (const variant of searchVariants) {
+            if (postUrns.filter(p => p.keyword === keyword).length >= limit) break;
 
-            const urns = extractPostUrns(html);
-            log.info(`Found ${urns.length} post URNs for "${keyword}"`);
+            let url = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&origin=FACETED_SEARCH&sortBy=%5B%22${variant.sort}%22%5D`;
+            if (variant.filter) url += `&datePosted=%5B%22${variant.filter}%22%5D`;
 
-            for (const urn of urns) {
-                if (seenUrns.has(urn)) continue;
-                if (postUrns.filter(p => p.keyword === keyword).length >= limit) break;
-                seenUrns.add(urn);
-                postUrns.push({ urn, keyword });
+            log.info(`Fetching "${keyword}" (${variant.label})...`);
+
+            try {
+                const res = await fetch(url, { headers: getHeaders(input.li_at), redirect: 'follow' });
+                const html = await res.text();
+
+                const urns = extractPostUrns(html);
+                let newCount = 0;
+                for (const urn of urns) {
+                    if (seenUrns.has(urn)) continue;
+                    if (postUrns.filter(p => p.keyword === keyword).length >= limit) break;
+                    seenUrns.add(urn);
+                    postUrns.push({ urn, keyword });
+                    newCount++;
+                }
+                log.info(`  → ${urns.length} URNs found, ${newCount} new`);
+            } catch (err) {
+                log.error(`Error: ${(err as Error).message}`);
             }
-        } catch (err) {
-            log.error(`Error fetching "${keyword}": ${(err as Error).message}`);
-        }
 
-        // Small delay between keywords
-        await new Promise(r => setTimeout(r, 1000));
+            await new Promise(r => setTimeout(r, 1500));
+        }
     }
 
     log.info(`Step 1 done: ${postUrns.length} total post URNs`);
