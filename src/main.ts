@@ -37,7 +37,8 @@ function buildPostsUrl(url: string): string {
 async function extractPostsFromPage(page: Page): Promise<any[]> {
     return page.evaluate(() => {
         const posts: any[] = [];
-        const html = document.body.innerHTML;
+        const html = document.body?.innerHTML || '';
+        if (!html) return posts;
         const seenUrns = new Set<string>();
 
         function parseCount(text: string): number {
@@ -212,20 +213,29 @@ async function triggerLazyLoad(page: Page): Promise<void> {
 // ─── Wait for posts to appear ───────────────────────────────────────────────
 
 async function waitForPosts(page: Page): Promise<boolean> {
-    for (let attempt = 0; attempt < 3; attempt++) {
+    // First wait for body to exist
+    try {
+        await page.waitForSelector('body', { timeout: 15000 });
+    } catch {
+        log.warning('  No body element found');
+        return false;
+    }
+
+    for (let attempt = 0; attempt < 5; attempt++) {
         await triggerLazyLoad(page);
 
         const hasPosts = await page.evaluate(() =>
-            document.body.innerHTML.includes('urn:li:activity:')
+            document.body?.innerHTML?.includes('urn:li:activity:') ?? false
         );
 
         if (hasPosts) {
             log.info('  Posts found');
             return true;
         }
-        await page.waitForTimeout(2000);
+        log.info(`  Waiting for posts... attempt ${attempt + 1}/5`);
+        await page.waitForTimeout(3000);
     }
-    log.warning('  No posts found after 3 attempts');
+    log.warning('  No posts found after 5 attempts');
     return false;
 }
 
