@@ -1,5 +1,5 @@
 # Use Apify's official Node.js actor image with Playwright support
-FROM apify/actor-node-playwright-chrome:18
+FROM apify/actor-node-playwright-chrome:20
 
 # Copy package files and install dependencies (cached layer)
 COPY package*.json ./
