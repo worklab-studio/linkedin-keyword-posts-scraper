@@ -1,5 +1,6 @@
 import { Actor } from 'apify';
-import { PlaywrightCrawler, Dataset, log } from 'crawlee';
+import { Dataset, log } from 'crawlee';
+import { chromium } from 'playwright';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -56,14 +57,21 @@ function resolveLinkedInDateFilter(input: Input): string {
     return '';
 }
 
-// ─── URL builder ──────────────────────────────────────────────────────────────
-
 function buildSearchUrl(keyword: string, dateFilter: string): string {
     let url = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&origin=FACETED_SEARCH&sortBy=%5B%22date_posted%22%5D`;
     if (dateFilter) {
         url += `&datePosted=%5B%22${dateFilter}%22%5D`;
     }
     return url;
+}
+
+function parseCount(text: string | null | undefined): number {
+    if (!text) return 0;
+    const cleaned = text.trim().toLowerCase().replace(/,/g, '');
+    if (cleaned.includes('k')) return Math.round(parseFloat(cleaned) * 1000);
+    if (cleaned.includes('m')) return Math.round(parseFloat(cleaned) * 1000000);
+    const num = parseInt(cleaned, 10);
+    return isNaN(num) ? 0 : num;
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -85,89 +93,98 @@ await Actor.main(async () => {
     log.info('='.repeat(60));
 
     // Proxy
-    let proxyConfiguration: any = undefined;
+    let proxyUrl: string | undefined;
     if (input.proxy?.useApifyProxy) {
-        proxyConfiguration = await Actor.createProxyConfiguration({
+        const proxyConfig = await Actor.createProxyConfiguration({
             groups: input.proxy.apifyProxyGroups ?? ['RESIDENTIAL'],
         });
-        log.info('Using Apify Residential proxies');
+        proxyUrl = await proxyConfig!.newUrl();
+        log.info('Using Apify Residential proxy');
     } else if (input.proxy?.proxyUrls?.length) {
-        proxyConfiguration = await Actor.createProxyConfiguration({
-            proxyUrls: input.proxy.proxyUrls,
-        });
+        proxyUrl = input.proxy.proxyUrls[0];
+        log.info('Using custom proxy');
     }
 
+    // Launch browser
+    const launchOptions: any = {
+        headless: true,
+        args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
+    };
+    if (proxyUrl) {
+        launchOptions.proxy = { server: proxyUrl };
+    }
+
+    const browser = await chromium.launch(launchOptions);
+
+    const context = await browser.newContext({
+        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        viewport: { width: 1920, height: 1080 },
+    });
+
+    // Set LinkedIn cookies
+    await context.addCookies([
+        {
+            name: 'li_at',
+            value: input.li_at,
+            domain: '.linkedin.com',
+            path: '/',
+            httpOnly: true,
+            secure: true,
+        },
+        {
+            name: 'JSESSIONID',
+            value: `"ajax:${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}"`,
+            domain: '.linkedin.com',
+            path: '/',
+            secure: true,
+        },
+    ]);
+
+    const page = await context.newPage();
+
+    // Warm up session — visit feed first
+    log.info('Warming up LinkedIn session...');
+    await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(3000);
+
+    const currentUrl = page.url();
+    if (currentUrl.includes('/login') || currentUrl.includes('/authwall')) {
+        log.error('li_at cookie is expired or invalid — redirected to login');
+        await browser.close();
+        throw new Error('LinkedIn authentication failed. Please refresh your li_at cookie.');
+    }
+    log.info('Session established successfully');
+
+    // Scrape each keyword
     const keywordCounts: Record<string, number> = {};
     for (const kw of input.keywords) keywordCounts[kw] = 0;
     const seenUrls = new Set<string>();
 
-    const crawler = new PlaywrightCrawler({
-        proxyConfiguration,
-        maxRequestRetries: 1,
-        requestHandlerTimeoutSecs: 120,
-        maxConcurrency: 1,
-        headless: true,
-        useSessionPool: false,
-        launchContext: {
-            launchOptions: { args: ['--disable-blink-features=AutomationControlled'] },
-        },
+    for (const keyword of input.keywords) {
+        const url = buildSearchUrl(keyword, dateFilter);
+        log.info(`Searching for "${keyword}"...`);
 
-        preNavigationHooks: [
-            async ({ page }) => {
-                await page.context().addCookies([
-                    {
-                        name: 'li_at',
-                        value: input.li_at,
-                        domain: '.linkedin.com',
-                        path: '/',
-                        httpOnly: true,
-                        secure: true,
-                    },
-                    {
-                        name: 'JSESSIONID',
-                        value: `"ajax:${Math.random().toString(36).slice(2)}"`,
-                        domain: '.linkedin.com',
-                        path: '/',
-                        secure: true,
-                    },
-                ]);
-            },
-        ],
-
-        async requestHandler({ request, page }) {
-            const { keyword } = request.userData as { keyword: string };
-            const kwLimit = Math.min(limit, 500);
-
-            log.info(`Navigating to search for "${keyword}"...`);
-
-            // Navigate to LinkedIn first to establish cookies
-            await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-            await page.waitForTimeout(2000);
-
-            // Now navigate to search
-            const url = buildSearchUrl(keyword, dateFilter);
+        try {
             await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-
-            // Wait for results to load
             await page.waitForTimeout(4000);
 
-            // Check if logged in
-            const currentUrl = page.url();
-            if (currentUrl.includes('/login') || currentUrl.includes('/authwall')) {
-                log.error(`Redirected to login for "${keyword}" — li_at cookie may be expired`);
-                return;
+            // Check for redirect
+            if (page.url().includes('/login') || page.url().includes('/authwall')) {
+                log.warning(`Redirected to login for "${keyword}" — skipping`);
+                continue;
             }
 
             const now = new Date().toISOString();
             let collected = 0;
             let noNewResults = 0;
 
-            while (collected < kwLimit && noNewResults < 3) {
-                // Extract post data from the page
+            while (collected < limit && noNewResults < 3) {
+                // Extract posts from DOM
                 const posts = await page.evaluate(() => {
                     const results: { url: string; author: string; reactions: number; comments: number }[] = [];
+                    const seenLocal = new Set<string>();
 
-                    function parseCount(text: string | null | undefined): number {
+                    function parseNum(text: string | null | undefined): number {
                         if (!text) return 0;
                         const cleaned = text.trim().toLowerCase().replace(/,/g, '');
                         if (cleaned.includes('k')) return Math.round(parseFloat(cleaned) * 1000);
@@ -176,9 +193,7 @@ await Actor.main(async () => {
                         return isNaN(num) ? 0 : num;
                     }
 
-                    // Get all post update links
                     const links = document.querySelectorAll('a[href*="/feed/update/"], a[href*="/posts/"]');
-                    const seenLocal = new Set<string>();
 
                     for (const link of links) {
                         const href = (link as HTMLAnchorElement).href;
@@ -186,35 +201,41 @@ await Actor.main(async () => {
                         if (!href.includes('/feed/update/') && !href.includes('/posts/')) continue;
                         seenLocal.add(href);
 
-                        // Find the parent post container
-                        const container = link.closest('.feed-shared-update-v2, .update-components-actor, [data-urn], .reusable-search__result-container');
+                        const container = link.closest('.feed-shared-update-v2, [data-urn], .reusable-search__result-container, .search-content__result');
 
-                        // Author name
                         let author = 'Unknown';
                         if (container) {
-                            const nameEl = container.querySelector('.update-components-actor__name span, .entity-result__title-text a span, .app-aware-link span[aria-hidden="true"], .feed-shared-actor__name span');
+                            const nameEl = container.querySelector(
+                                '.update-components-actor__name span[aria-hidden="true"], ' +
+                                '.entity-result__title-text a span, ' +
+                                '.app-aware-link span[aria-hidden="true"], ' +
+                                '.feed-shared-actor__name span[aria-hidden="true"]'
+                            );
                             if (nameEl?.textContent?.trim()) {
                                 author = nameEl.textContent.trim();
                             }
                         }
 
-                        // Reactions count (likes/reactions)
                         let reactions = 0;
-                        if (container) {
-                            const reactionsEl = container.querySelector('.social-details-social-counts__reactions-count, [aria-label*="reaction"], [aria-label*="like"], .social-details-social-counts__count-value');
-                            reactions = parseCount(reactionsEl?.textContent);
-                            if (!reactions) {
-                                const ariaLabel = reactionsEl?.getAttribute('aria-label') ?? '';
-                                reactions = parseCount(ariaLabel.match(/(\d[\d,]*)/)?.[1]);
-                            }
-                        }
-
-                        // Comments count
                         let comments = 0;
                         if (container) {
-                            const commentsEl = container.querySelector('[aria-label*="comment"], button[aria-label*="comment"]');
-                            const commentsLabel = commentsEl?.getAttribute('aria-label') ?? commentsEl?.textContent ?? '';
-                            comments = parseCount(commentsLabel.match(/(\d[\d,]*)/)?.[1] ?? commentsLabel);
+                            const reactionsEl = container.querySelector(
+                                '.social-details-social-counts__reactions-count, ' +
+                                '[aria-label*="reaction"], ' +
+                                '.social-details-social-counts__count-value'
+                            );
+                            if (reactionsEl) {
+                                reactions = parseNum(reactionsEl.textContent) ||
+                                    parseNum(reactionsEl.getAttribute('aria-label')?.match(/(\d[\d,]*)/)?.[1]);
+                            }
+
+                            const commentsEl = container.querySelector(
+                                '[aria-label*="comment"], button[aria-label*="comment"]'
+                            );
+                            if (commentsEl) {
+                                const label = commentsEl.getAttribute('aria-label') ?? commentsEl.textContent ?? '';
+                                comments = parseNum(label.match(/(\d[\d,]*)/)?.[1] ?? label);
+                            }
                         }
 
                         results.push({ url: href, author, reactions, comments });
@@ -226,8 +247,7 @@ await Actor.main(async () => {
                 const prevCollected = collected;
 
                 for (const post of posts) {
-                    if (collected >= kwLimit) break;
-                    // Normalize URL
+                    if (collected >= limit) break;
                     let postUrl = post.url.split('?')[0];
                     if (!postUrl.endsWith('/')) postUrl += '/';
 
@@ -253,15 +273,15 @@ await Actor.main(async () => {
                     noNewResults = 0;
                 }
 
-                if (collected >= kwLimit) break;
+                if (collected >= limit) break;
 
-                // Scroll down to load more
+                // Scroll to load more
                 await page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
                 await page.waitForTimeout(2000);
 
-                // Click "Show more results" button if present
+                // Click "Show more" button if present
                 try {
-                    const showMore = await page.$('button.scaffold-finite-scroll__load-button, button[aria-label*="more results"]');
+                    const showMore = await page.$('button.scaffold-finite-scroll__load-button');
                     if (showMore) {
                         await showMore.click();
                         await page.waitForTimeout(2000);
@@ -271,22 +291,15 @@ await Actor.main(async () => {
 
             log.info(`"${keyword}": scraped ${collected} posts`);
 
-            // Delay between keywords to avoid detection
-            await page.waitForTimeout(3000 + Math.random() * 3000);
-        },
+        } catch (err) {
+            log.error(`Error scraping "${keyword}": ${(err as Error).message}`);
+        }
 
-        failedRequestHandler({ request, error }) {
-            log.error(`Failed: ${request.url} — ${(error as Error).message}`);
-        },
-    });
+        // Delay between keywords
+        await page.waitForTimeout(2000 + Math.random() * 3000);
+    }
 
-    // One request per keyword
-    const requests = input.keywords.map(keyword => ({
-        url: buildSearchUrl(keyword, dateFilter),
-        userData: { keyword },
-    }));
-
-    await crawler.run(requests);
+    await browser.close();
 
     const total = Object.values(keywordCounts).reduce((a, b) => a + b, 0);
     log.info('='.repeat(60));
