@@ -109,11 +109,9 @@ function extractPostsFromVoyagerResponse(data: any, keyword: string): PostResult
     const now = new Date().toISOString();
 
     try {
-        // GraphQL response: data.data.searchDashClustersByAll.elements[]
-        const clusters =
-            data?.data?.searchDashClustersByAll?.elements ??
-            data?.elements ??
-            [];
+        // GraphQL response: data.data.data.searchDashClustersByAll.elements[]
+        const root = data?.data?.data?.searchDashClustersByAll ?? data?.data?.searchDashClustersByAll;
+        const clusters = root?.elements ?? [];
 
         for (const cluster of clusters) {
             const items = cluster?.items ?? [];
@@ -249,20 +247,18 @@ await Actor.main(async () => {
             }
 
             // Debug: log response structure
-            log.info(`Response top keys: ${JSON.stringify(Object.keys(data ?? {}))}`);
-            log.info(`data.data keys: ${JSON.stringify(Object.keys(data?.data ?? {}))}`);
-            log.info(`data.data (first 2000 chars): ${JSON.stringify(data?.data).slice(0, 2000)}`);
-            if (data?.included?.length) {
-                log.info(`Included count: ${data.included.length}`);
-                const types = [...new Set(data.included.map((i: any) => i.$type).filter(Boolean))];
-                log.info(`Included types: ${JSON.stringify(types)}`);
-                // Log first few included items with activity URNs
-                const activities = data.included.filter((i: any) =>
-                    JSON.stringify(i).includes('activity') || i.$type?.includes('Update') || i.$type?.includes('Post')
-                );
-                log.info(`Activity-related included items: ${activities.length}`);
-                if (activities[0]) {
-                    log.info(`First activity item: ${JSON.stringify(activities[0]).slice(0, 500)}`);
+            const clusters = data?.data?.data?.searchDashClustersByAll ?? data?.data?.searchDashClustersByAll;
+            log.info(`Clusters found: ${!!clusters}, totalResultCount: ${clusters?.metadata?.totalResultCount}`);
+            log.info(`Elements count: ${clusters?.elements?.length}`);
+            if (clusters?.elements?.[0]) {
+                const el = clusters.elements[0];
+                log.info(`First element keys: ${JSON.stringify(Object.keys(el))}`);
+                log.info(`First element items count: ${el.items?.length}`);
+                if (el.items?.[0]) {
+                    log.info(`First item (500 chars): ${JSON.stringify(el.items[0]).slice(0, 500)}`);
+                }
+                if (el.items?.[1]) {
+                    log.info(`Second item (500 chars): ${JSON.stringify(el.items[1]).slice(0, 500)}`);
                 }
             }
 
