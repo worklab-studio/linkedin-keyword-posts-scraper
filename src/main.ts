@@ -205,15 +205,18 @@ await Actor.main(async () => {
             const linkedinMentions = (html.match(/linkedin\.com/g) || []).length;
             log.info(`LinkedIn mentions in HTML: ${linkedinMentions}`);
 
-            // Log first 1000 chars to understand what Google returned
-            log.info(`HTML sample: ${html.slice(0, 1000)}`);
+            // Google embeds results in JS — extract all LinkedIn URLs from entire response
+            // including encoded/escaped URLs
+            const decoded = html
+                .replace(/\\x([0-9a-f]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+                .replace(/\\u([0-9a-f]{4})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+                .replace(/\\"/g, '"')
+                .replace(/\\\//g, '/');
 
-            // Check for Google consent page
-            if (html.includes('consent.google') || html.includes('Before you continue')) {
-                log.warning('Google consent page detected — need to handle cookies');
-            }
+            const allLinkedinMentions = (decoded.match(/linkedin\.com/g) || []).length;
+            log.info(`LinkedIn mentions after decoding: ${allLinkedinMentions}`);
 
-            const urls = extractLinkedInUrls(html);
+            const urls = extractLinkedInUrls(decoded);
             log.info(`Google: "${keyword}" → ${urls.length} post URLs`);
 
             for (const url of urls) {
