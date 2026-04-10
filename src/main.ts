@@ -142,7 +142,7 @@ await Actor.main(async () => {
     let proxyConfiguration: any = undefined;
     if (input.proxy?.useApifyProxy) {
         proxyConfiguration = await Actor.createProxyConfiguration({
-            groups: input.proxy.apifyProxyGroups ?? ['GOOGLE_SERP'],
+            groups: input.proxy.apifyProxyGroups ?? ['RESIDENTIAL'],
         });
         log.info('Using Apify proxy');
     } else if (input.proxy?.proxyUrls?.length) {

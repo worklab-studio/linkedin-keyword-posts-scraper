@@ -69,7 +69,7 @@
             "type": "object",
             "description": "Proxy settings. Recommended: use Apify GOOGLE_SERP proxies for best results.",
             "editor": "proxy",
-            "prefill": { "useApifyProxy": true, "apifyProxyGroups": ["GOOGLE_SERP"] }
+            "prefill": { "useApifyProxy": true, "apifyProxyGroups": ["RESIDENTIAL"] }
         }
     },
     "required": ["keywords"]
