@@ -126,11 +126,14 @@ await Actor.main(async () => {
         page.on('response', responseHandler);
 
         try {
-            await page.goto(buildSearchUrl(keyword, dateFilter), { waitUntil: 'commit', timeout: 30000 });
+            await page.goto(buildSearchUrl(keyword, dateFilter), { waitUntil: 'commit', timeout: 60000 });
         } catch { log.info('Navigation slow, continuing...'); }
 
-        // Wait for content
-        await page.waitForTimeout(5000);
+        // Wait for content to render
+        try {
+            await page.waitForSelector('[role="listitem"]', { timeout: 15000 });
+        } catch { /* may not appear */ }
+        await page.waitForTimeout(3000);
 
         // Also extract URNs from current page HTML
         const html = await page.content();
@@ -140,22 +143,22 @@ await Actor.main(async () => {
         log.info(`  Initial: ${capturedUrns.size} URNs`);
 
         // Scroll to load more posts
-        let prevSize = 0;
+        let emptyScrolls = 0;
         let scrollAttempts = 0;
-        const maxScrolls = Math.ceil(limit / 5); // ~5 new posts per scroll
+        const maxScrolls = Math.min(Math.ceil(limit / 3), 30);
 
-        while (capturedUrns.size < limit + seenUrns.size && scrollAttempts < maxScrolls) {
-            prevSize = capturedUrns.size;
+        while (capturedUrns.size - seenUrns.size < limit && scrollAttempts < maxScrolls && emptyScrolls < 3) {
+            const prevSize = capturedUrns.size;
 
             await page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
-            await page.waitForTimeout(2000);
+            await page.waitForTimeout(3000);
 
             // Click "Load more" if visible
             try {
                 const loadMore = await page.$('button:has-text("Load more")');
                 if (loadMore) {
                     await loadMore.click();
-                    await page.waitForTimeout(3000);
+                    await page.waitForTimeout(4000);
                 }
             } catch { /* no button */ }
 
@@ -166,10 +169,12 @@ await Actor.main(async () => {
 
             scrollAttempts++;
             if (capturedUrns.size === prevSize) {
-                log.info(`  No new URNs after scroll ${scrollAttempts}, stopping`);
-                break;
+                emptyScrolls++;
+                log.info(`  Scroll ${scrollAttempts}: no new URNs (${emptyScrolls}/3 empty)`);
+            } else {
+                emptyScrolls = 0;
+                log.info(`  Scroll ${scrollAttempts}: ${capturedUrns.size} URNs total`);
             }
-            log.info(`  Scroll ${scrollAttempts}: ${capturedUrns.size} URNs`);
         }
 
         page.removeListener('response', responseHandler);
@@ -210,6 +215,12 @@ await Actor.main(async () => {
             async requestHandler({ request, body }) {
                 const { keyword } = request.userData as { keyword: string };
                 const parsed = parsePostPage(body.toString());
+
+                // Skip login/signup pages (private posts)
+                if (parsed.author === 'Sign Up' || parsed.author === 'LinkedIn' || parsed.text === '') {
+                    log.info(`⊘ Skipped private post: ${request.url.slice(0, 80)}`);
+                    return;
+                }
 
                 log.info(`✓ ${parsed.author} | ${parsed.reactions} reactions | ${parsed.comments} comments`);
 
