@@ -230,7 +230,7 @@ await Actor.main(async () => {
         maxRequestRetries: 3,
         requestHandlerTimeoutSecs: 30,
         maxConcurrency: 2,
-        additionalMimeTypes: ['application/octet-stream'],
+        additionalMimeTypes: ['application/octet-stream', 'application/vnd.linkedin.normalized+json+2.1'],
 
         async requestHandler({ request, body }) {
             const { keyword, limit: kwLimit } = request.userData as {
