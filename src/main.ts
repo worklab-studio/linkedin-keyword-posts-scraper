@@ -53,7 +53,8 @@ function resolveGoogleTbs(input: Input): string {
 
 function buildGoogleUrl(keyword: string, tbs: string, start: number = 0): string {
     const q = `site:linkedin.com/posts "${keyword}"`;
-    let url = `https://www.google.com/search?q=${encodeURIComponent(q)}&num=10`;
+    // Use &gbv=1 to force basic HTML mode (no JavaScript rendering needed)
+    let url = `https://www.google.com/search?q=${encodeURIComponent(q)}&num=10&gbv=1&sei=1`;
     if (tbs) url += `&tbs=${tbs}`;
     if (start > 0) url += `&start=${start}`;
     return url;
@@ -175,6 +176,14 @@ await Actor.main(async () => {
         maxRequestRetries: 3,
         requestHandlerTimeoutSecs: 30,
         maxConcurrency: 1,
+        preNavigationHooks: [
+            (_ctx, goToOptions) => {
+                goToOptions.headerGeneratorOptions = {
+                    browsers: [{ name: 'chrome', minVersion: 120 }],
+                    operatingSystems: ['windows'],
+                };
+            },
+        ],
 
         async requestHandler({ request, body }) {
             const { keyword } = request.userData as { keyword: string };
