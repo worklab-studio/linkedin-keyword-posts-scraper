@@ -2,8 +2,6 @@ import { Actor } from 'apify';
 import { Dataset, log } from 'crawlee';
 import { chromium } from 'playwright';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
 interface Input {
     keywords: string[];
     date?: string;
@@ -20,14 +18,13 @@ interface Input {
 
 interface PostResult {
     author_name: string;
+    author_profile: string;
     keyword: string;
     post_url: string;
     reactions: number;
     comments: number;
     scraped_at: string;
 }
-
-// ─── Date helpers ─────────────────────────────────────────────────────────────
 
 const LINKEDIN_DATE_FILTER_MAP: Record<string, string> = {
     'last-1-day': 'past-24h',
@@ -42,16 +39,14 @@ const LINKEDIN_DATE_FILTER_MAP: Record<string, string> = {
 };
 
 function resolveLinkedInDateFilter(input: Input): string {
-    if (input.date && input.date !== 'ignore') {
-        return LINKEDIN_DATE_FILTER_MAP[input.date] ?? '';
-    }
+    if (input.date && input.date !== 'ignore') return LINKEDIN_DATE_FILTER_MAP[input.date] ?? '';
     if (input.from || input.to) {
         const now = Date.now();
-        const start = input.from ? new Date(input.from).getTime() : now - 180 * 24 * 60 * 60 * 1000;
-        const diffDays = (now - start) / (24 * 60 * 60 * 1000);
-        if (diffDays <= 1) return 'past-24h';
-        if (diffDays <= 7) return 'past-week';
-        if (diffDays <= 30) return 'past-month';
+        const start = input.from ? new Date(input.from).getTime() : now - 180 * 86400000;
+        const days = (now - start) / 86400000;
+        if (days <= 1) return 'past-24h';
+        if (days <= 7) return 'past-week';
+        if (days <= 30) return 'past-month';
         return '';
     }
     return '';
@@ -59,26 +54,34 @@ function resolveLinkedInDateFilter(input: Input): string {
 
 function buildSearchUrl(keyword: string, dateFilter: string): string {
     let url = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&origin=FACETED_SEARCH&sortBy=%5B%22date_posted%22%5D`;
-    if (dateFilter) {
-        url += `&datePosted=%5B%22${dateFilter}%22%5D`;
-    }
+    if (dateFilter) url += `&datePosted=%5B%22${dateFilter}%22%5D`;
     return url;
 }
 
-function parseCount(text: string | null | undefined): number {
-    if (!text) return 0;
-    const cleaned = text.trim().toLowerCase().replace(/,/g, '');
-    if (cleaned.includes('k')) return Math.round(parseFloat(cleaned) * 1000);
-    if (cleaned.includes('m')) return Math.round(parseFloat(cleaned) * 1000000);
-    const num = parseInt(cleaned, 10);
-    return isNaN(num) ? 0 : num;
-}
+// Extract post data from intercepted API responses
+function extractPostsFromApiData(included: any[]): Map<string, any> {
+    const posts = new Map<string, any>();
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
+    for (const item of included) {
+        const urn = item.entityUrn ?? item['$id'] ?? '';
+        const type = item['$type'] ?? '';
+
+        // Look for update/activity entities
+        if (urn.includes('fsd_update') || urn.includes('activity') || urn.includes('ugcPost')) {
+            posts.set(urn, item);
+        }
+
+        // Also collect actor/profile data
+        if (type.includes('MiniProfile') || type.includes('Actor')) {
+            posts.set(urn, item);
+        }
+    }
+
+    return posts;
+}
 
 await Actor.main(async () => {
     const input = (await Actor.getInput<Input>())!;
-
     if (!input?.keywords?.length) throw new Error('Input must include at least one keyword.');
     if (!input?.li_at) throw new Error('LinkedIn li_at cookie is required.');
 
@@ -92,226 +95,180 @@ await Actor.main(async () => {
     log.info(`Date filter: ${dateFilter || 'none (all time)'}`);
     log.info('='.repeat(60));
 
-    // Proxy
     let proxyUrl: string | undefined;
     if (input.proxy?.useApifyProxy) {
-        const proxyConfig = await Actor.createProxyConfiguration({
-            groups: input.proxy.apifyProxyGroups ?? ['RESIDENTIAL'],
-        });
-        proxyUrl = await proxyConfig!.newUrl();
+        const pc = await Actor.createProxyConfiguration({ groups: input.proxy.apifyProxyGroups ?? ['RESIDENTIAL'] });
+        proxyUrl = await pc!.newUrl();
         log.info('Using Apify Residential proxy');
     } else if (input.proxy?.proxyUrls?.length) {
         proxyUrl = input.proxy.proxyUrls[0];
-        log.info('Using custom proxy');
     }
 
-    // Launch browser
     const launchOptions: any = {
         headless: true,
         args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
     };
-    if (proxyUrl) {
-        launchOptions.proxy = { server: proxyUrl };
-    }
+    if (proxyUrl) launchOptions.proxy = { server: proxyUrl };
 
     const browser = await chromium.launch(launchOptions);
-
     const context = await browser.newContext({
         userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         viewport: { width: 1920, height: 1080 },
     });
 
-    // Set LinkedIn cookies
     await context.addCookies([
-        {
-            name: 'li_at',
-            value: input.li_at,
-            domain: '.linkedin.com',
-            path: '/',
-            httpOnly: true,
-            secure: true,
-        },
-        {
-            name: 'JSESSIONID',
-            value: `"ajax:${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}"`,
-            domain: '.linkedin.com',
-            path: '/',
-            secure: true,
-        },
+        { name: 'li_at', value: input.li_at, domain: '.linkedin.com', path: '/', httpOnly: true, secure: true },
+        { name: 'JSESSIONID', value: `"ajax:${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}"`, domain: '.linkedin.com', path: '/', secure: true },
     ]);
 
     const page = await context.newPage();
 
-    // Warm up session — visit a lightweight LinkedIn page first
-    log.info('Warming up LinkedIn session...');
+    // Warmup
+    log.info('Warming up session...');
     try {
         await page.goto('https://www.linkedin.com/check/ring/dashboard', { waitUntil: 'commit', timeout: 15000 });
-    } catch {
-        // Even if it times out, cookies are set and session may be established
-        log.info('Warmup page slow, continuing anyway...');
-    }
+    } catch { log.info('Warmup slow, continuing...'); }
     await page.waitForTimeout(2000);
 
-    const currentUrl = page.url();
-    if (currentUrl.includes('/login') || currentUrl.includes('/authwall')) {
-        log.error('li_at cookie is expired or invalid — redirected to login');
+    if (page.url().includes('/login') || page.url().includes('/authwall')) {
         await browser.close();
-        throw new Error('LinkedIn authentication failed. Please refresh your li_at cookie.');
+        throw new Error('LinkedIn auth failed. Refresh your li_at cookie.');
     }
     log.info('Session established');
 
-    // Scrape each keyword
     const keywordCounts: Record<string, number> = {};
     for (const kw of input.keywords) keywordCounts[kw] = 0;
     const seenUrls = new Set<string>();
 
     for (const keyword of input.keywords) {
-        const url = buildSearchUrl(keyword, dateFilter);
         log.info(`Searching for "${keyword}"...`);
 
         try {
-            await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
-            await page.waitForTimeout(5000);
+            // Intercept API responses to capture post data
+            const apiData: any[] = [];
+            const responseHandler = async (response: any) => {
+                const url = response.url();
+                if (url.includes('/graphql') || url.includes('/search/')) {
+                    try {
+                        const json = await response.json();
+                        if (json?.included) apiData.push(...json.included);
+                        if (json?.data?.included) apiData.push(...json.data.included);
+                    } catch { /* not JSON */ }
+                }
+            };
+            page.on('response', responseHandler);
 
-            log.info(`Page loaded: ${page.url()}`);
+            await page.goto(buildSearchUrl(keyword, dateFilter), { waitUntil: 'networkidle', timeout: 60000 });
+            await page.waitForTimeout(3000);
 
-            // Check for redirect
-            if (page.url().includes('/login') || page.url().includes('/authwall')) {
-                log.warning(`Redirected to login for "${keyword}" — skipping`);
-                continue;
+            log.info(`Page loaded, intercepted ${apiData.length} API items`);
+
+            // Extract from DOM
+            const domPosts = await page.evaluate(() => {
+                const results: { author: string; profileUrl: string; reactions: number; comments: number }[] = [];
+
+                function parseNum(t: string | null | undefined): number {
+                    if (!t) return 0;
+                    const c = t.trim().toLowerCase().replace(/,/g, '');
+                    if (c.includes('k')) return Math.round(parseFloat(c) * 1000);
+                    if (c.includes('m')) return Math.round(parseFloat(c) * 1000000);
+                    return parseInt(c, 10) || 0;
+                }
+
+                const containers = document.querySelectorAll('[role="listitem"]');
+                for (const el of containers) {
+                    const profileLink = el.querySelector('a[href*="/in/"], a[href*="/company/"]') as HTMLAnchorElement;
+                    if (!profileLink) continue;
+
+                    let author = 'Unknown';
+                    const menuBtn = el.querySelector('[aria-label*="post by"]');
+                    if (menuBtn) {
+                        const m = menuBtn.getAttribute('aria-label')?.match(/post by (.+)/i);
+                        if (m) author = m[1].trim();
+                    }
+                    if (author === 'Unknown') {
+                        const p = el.querySelector('p');
+                        if (p?.textContent?.trim() && p.textContent.trim().length < 50) author = p.textContent.trim();
+                    }
+
+                    let reactions = 0, comments = 0;
+                    for (const span of el.querySelectorAll('span')) {
+                        const t = span.textContent?.trim().toLowerCase() ?? '';
+                        if (t.match(/^\d+\s*reactions?$/)) reactions = parseNum(t.match(/(\d+)/)?.[1]);
+                        else if (t.match(/^\d+\s*comments?$/)) comments = parseNum(t.match(/(\d+)/)?.[1]);
+                    }
+
+                    results.push({ author, profileUrl: profileLink.href.split('?')[0], reactions, comments });
+                }
+                return results;
+            });
+
+            log.info(`DOM: ${domPosts.length} posts, API: ${apiData.length} items`);
+
+            // Extract activity URNs from API data and page HTML
+            const activityUrns: string[] = [];
+            for (const item of apiData) {
+                const urn = item.entityUrn ?? item['$id'] ?? '';
+                if (urn.includes('fsd_update')) {
+                    // fsd_update URNs contain the activity ID: urn:li:fsd_update:(urn:li:activity:123,...)
+                    const actMatch = urn.match(/activity:(\d+)/);
+                    if (actMatch) activityUrns.push(actMatch[1]);
+                }
             }
+
+            // Also extract from page HTML as fallback
+            if (activityUrns.length === 0) {
+                const html = await page.content();
+                const matches = [...html.matchAll(/urn:li:activity:(\d+)/g)];
+                for (const m of matches) {
+                    if (!activityUrns.includes(m[1])) activityUrns.push(m[1]);
+                }
+            }
+
+            log.info(`Found ${activityUrns.length} activity IDs`);
 
             const now = new Date().toISOString();
-            let collected = 0;
-            let noNewResults = 0;
+            for (let i = 0; i < domPosts.length; i++) {
+                if (keywordCounts[keyword] >= limit) break;
+                const post = domPosts[i];
 
-            while (collected < limit && noNewResults < 3) {
-                // Extract posts from DOM + activity URNs from HTML
-                const posts = await page.evaluate(() => {
-                    const results: { url: string; author: string; reactions: number; comments: number }[] = [];
-
-                    function parseNum(text: string | null | undefined): number {
-                        if (!text) return 0;
-                        const cleaned = text.trim().toLowerCase().replace(/,/g, '');
-                        if (cleaned.includes('k')) return Math.round(parseFloat(cleaned) * 1000);
-                        if (cleaned.includes('m')) return Math.round(parseFloat(cleaned) * 1000000);
-                        const num = parseInt(cleaned, 10);
-                        return isNaN(num) ? 0 : num;
-                    }
-
-                    // Extract activity URNs from page HTML for post URLs
-                    const html = document.documentElement.innerHTML;
-                    const urnMatches = [...html.matchAll(/urn:li:(activity|ugcPost):(\d+)/g)];
-                    const activityUrns = [...new Set(urnMatches.map(m => m[0]))];
-
-                    const postContainers = document.querySelectorAll('[role="listitem"]');
-                    let urnIndex = 0;
-
-                    for (const container of postContainers) {
-                        // Find profile link (author URL)
-                        const profileLink = container.querySelector('a[href*="/in/"], a[href*="/company/"]') as HTMLAnchorElement;
-                        if (!profileLink) continue;
-
-                        // Author name from "Open control menu for post by X" button
-                        let author = 'Unknown';
-                        const menuBtn = container.querySelector('[aria-label*="post by"]');
-                        if (menuBtn) {
-                            const label = menuBtn.getAttribute('aria-label') ?? '';
-                            const match = label.match(/post by (.+)/i);
-                            if (match) author = match[1].trim();
-                        }
-                        if (author === 'Unknown') {
-                            const nameP = container.querySelector('p');
-                            if (nameP?.textContent?.trim() && nameP.textContent.trim().length < 50) {
-                                author = nameP.textContent.trim();
-                            }
-                        }
-
-                        // Reactions and comments from screen-reader spans
-                        let reactions = 0;
-                        let comments = 0;
-                        const srSpans = container.querySelectorAll('span');
-                        for (const span of srSpans) {
-                            const text = span.textContent?.trim().toLowerCase() ?? '';
-                            if (text.match(/^\d+\s*reactions?$/)) {
-                                reactions = parseNum(text.match(/(\d+)/)?.[1]);
-                            } else if (text.match(/^\d+\s*comments?$/)) {
-                                comments = parseNum(text.match(/(\d+)/)?.[1]);
-                            }
-                        }
-
-                        // Match post URL from activity URNs (in order)
-                        let postUrl = profileLink.href.split('?')[0];
-                        // Try to find a matching URN from the container's inner HTML
-                        const containerHtml = container.innerHTML;
-                        const containerUrn = containerHtml.match(/urn:li:(activity|ugcPost):(\d+)/);
-                        if (containerUrn) {
-                            const [fullUrn] = containerUrn;
-                            postUrl = `https://www.linkedin.com/feed/update/${fullUrn}/`;
-                        } else if (urnIndex < activityUrns.length) {
-                            // Fallback: use URNs in order
-                            postUrl = `https://www.linkedin.com/feed/update/${activityUrns[urnIndex]}/`;
-                            urnIndex++;
-                        }
-
-                        results.push({ url: postUrl, author, reactions, comments });
-                    }
-
-                    return results;
-                });
-
-                const prevCollected = collected;
-
-                for (const post of posts) {
-                    if (collected >= limit) break;
-                    let postUrl = post.url.split('?')[0];
-                    if (!postUrl.endsWith('/')) postUrl += '/';
-
-                    if (seenUrls.has(postUrl)) continue;
-                    seenUrls.add(postUrl);
-
-                    await Dataset.pushData({
-                        author_name: post.author,
-                        keyword,
-                        post_url: postUrl,
-                        reactions: post.reactions,
-                        comments: post.comments,
-                        scraped_at: now,
-                    } as PostResult);
-
-                    keywordCounts[keyword]++;
-                    collected++;
+                // Match post URL from activity URNs (by order)
+                let postUrl = post.profileUrl;
+                if (i < activityUrns.length) {
+                    postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${activityUrns[i]}/`;
                 }
 
-                if (collected === prevCollected) {
-                    noNewResults++;
-                } else {
-                    noNewResults = 0;
-                }
+                if (seenUrls.has(postUrl)) continue;
+                seenUrls.add(postUrl);
 
-                if (collected >= limit) break;
+                await Dataset.pushData({
+                    author_name: post.author,
+                    author_profile: post.profileUrl,
+                    keyword,
+                    post_url: postUrl,
+                    reactions: post.reactions,
+                    comments: post.comments,
+                    scraped_at: now,
+                } as PostResult);
 
-                // Scroll to load more
-                await page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
-                await page.waitForTimeout(2000);
-
-                // Click "Show more" button if present
-                try {
-                    const showMore = await page.$('button.scaffold-finite-scroll__load-button');
-                    if (showMore) {
-                        await showMore.click();
-                        await page.waitForTimeout(2000);
-                    }
-                } catch { /* ignore */ }
+                keywordCounts[keyword]++;
             }
 
-            log.info(`"${keyword}": scraped ${collected} posts`);
+            log.info(`"${keyword}": ${keywordCounts[keyword]} posts`);
+
+            // Remove listener for next keyword
+            page.removeListener('response', responseHandler);
+
+            // Scroll for more if needed
+            if (keywordCounts[keyword] < limit) {
+                await page.evaluate(() => window.scrollBy(0, window.innerHeight * 3));
+                await page.waitForTimeout(3000);
+            }
 
         } catch (err) {
             log.error(`Error scraping "${keyword}": ${(err as Error).message}`);
         }
 
-        // Delay between keywords
         await page.waitForTimeout(2000 + Math.random() * 3000);
     }
 
@@ -320,14 +277,8 @@ await Actor.main(async () => {
     const total = Object.values(keywordCounts).reduce((a, b) => a + b, 0);
     log.info('='.repeat(60));
     log.info(`Done. Total: ${total} posts`);
-    for (const [kw, count] of Object.entries(keywordCounts)) {
-        log.info(`  "${kw}": ${count} posts`);
-    }
+    for (const [kw, count] of Object.entries(keywordCounts)) log.info(`  "${kw}": ${count}`);
     log.info('='.repeat(60));
 
-    await Actor.setValue('OUTPUT_SUMMARY', {
-        total_posts: total,
-        keywords: keywordCounts,
-        completed_at: new Date().toISOString(),
-    });
+    await Actor.setValue('OUTPUT_SUMMARY', { total_posts: total, keywords: keywordCounts, completed_at: new Date().toISOString() });
 });
