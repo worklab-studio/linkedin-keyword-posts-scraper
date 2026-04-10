@@ -54,33 +54,13 @@ function resolveLinkedInDateFilter(input: Input): string {
     return '';
 }
 
-// ─── LinkedIn helpers ─────────────────────────────────────────────────────────
+// ─── LinkedIn API ─────────────────────────────────────────────────────────────
 
 const JSESSIONID = `ajax:${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`.slice(0, 24);
 
-function buildSearchPageUrl(keyword: string, start: number, dateFilter: string): string {
-    let url = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&origin=GLOBAL_SEARCH_HEADER&sortBy=%22date_posted%22&start=${start}`;
-    if (dateFilter) {
-        url += `&datePosted=%22${dateFilter}%22`;
-    }
-    return url;
-}
-
-function getPageHeaders(li_at: string): Record<string, string> {
+function getHeaders(li_at: string, accept: string): Record<string, string> {
     return {
-        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'accept-language': 'en-US,en;q=0.9',
-        'cookie': `li_at=${li_at}; JSESSIONID="${JSESSIONID}"`,
-        'sec-fetch-dest': 'document',
-        'sec-fetch-mode': 'navigate',
-        'sec-fetch-site': 'same-origin',
-        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    };
-}
-
-function getApiHeaders(li_at: string): Record<string, string> {
-    return {
-        'accept': 'application/vnd.linkedin.normalized+json+2.1',
+        'accept': accept,
         'accept-language': 'en-US,en;q=0.9',
         'cookie': `li_at=${li_at}; JSESSIONID="${JSESSIONID}"`,
         'csrf-token': JSESSIONID,
@@ -107,100 +87,230 @@ function getApiHeaders(li_at: string): Record<string, string> {
     };
 }
 
-// Extract embedded JSON data from LinkedIn's SSR HTML
-// LinkedIn embeds initial state in <code> tags with specific formats
-function extractPostsFromHtml(html: string, keyword: string): PostResult[] {
+// Build GraphQL search URL
+function buildGraphqlUrl(keyword: string, start: number, dateFilter: string): string {
+    const filters: string[] = ['(key:resultType,value:List(CONTENT))'];
+    if (dateFilter) {
+        filters.push(`(key:datePosted,value:List(${dateFilter}))`);
+    }
+    const queryParameters = `List(${filters.join(',')})`;
+    const variables = `(start:${start},count:10,origin:GLOBAL_SEARCH_HEADER,query:(keywords:${encodeURIComponent(keyword)},flagshipSearchIntent:SEARCH_SRP,queryParameters:${queryParameters},includeFiltersInResponse:false))`;
+    const queryId = 'voyagerSearchDashClusters.b0928897b71bd00a5a7291755dcd64f0';
+    return `https://www.linkedin.com/voyager/api/graphql?variables=${variables}&queryId=${queryId}&includeWebMetadata=true`;
+}
+
+// Build HTML search page URL
+function buildSearchPageUrl(keyword: string, dateFilter: string): string {
+    let url = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&origin=GLOBAL_SEARCH_HEADER&sortBy=%22date_posted%22`;
+    if (dateFilter) {
+        url += `&datePosted=%22${dateFilter}%22`;
+    }
+    return url;
+}
+
+async function tryApproach(
+    name: string,
+    url: string,
+    headers: Record<string, string>,
+    keyword: string,
+    dateFilter: string,
+): Promise<PostResult[]> {
+    log.info(`[${name}] Trying: ${url.slice(0, 120)}...`);
+    try {
+        const res = await fetch(url, { headers, redirect: 'follow' });
+        const text = await res.text();
+        log.info(`[${name}] Status: ${res.status}, Size: ${text.length}, Content-Type: ${res.headers.get('content-type')}`);
+
+        if (!res.ok) {
+            log.warning(`[${name}] Failed: HTTP ${res.status}`);
+            return [];
+        }
+
+        // Try to parse as JSON
+        let data: any;
+        try {
+            data = JSON.parse(text);
+        } catch {
+            // Not JSON — treat as HTML
+            return extractPostsFromHtml(text, keyword);
+        }
+
+        // Log response structure
+        const topKeys = Object.keys(data);
+        log.info(`[${name}] Response keys: ${JSON.stringify(topKeys)}`);
+
+        if (data.included && Array.isArray(data.included)) {
+            log.info(`[${name}] Included: ${data.included.length} items`);
+            const types = [...new Set(data.included.map((i: any) => i.$type).filter(Boolean))];
+            log.info(`[${name}] Types: ${JSON.stringify(types.slice(0, 10))}`);
+        }
+
+        // Try to find search results in various paths
+        const searchResult =
+            data?.data?.data?.searchDashClustersByAll ??
+            data?.data?.searchDashClustersByAll ??
+            data?.searchDashClustersByAll;
+
+        if (searchResult) {
+            log.info(`[${name}] Found clusters! Total: ${searchResult.metadata?.totalResultCount}`);
+            return extractPostsFromClusters(searchResult, data?.included ?? [], keyword);
+        }
+
+        // Check for elements directly (REST format)
+        if (data?.elements) {
+            log.info(`[${name}] Found elements directly: ${data.elements.length}`);
+            return extractPostsFromElements(data.elements, data?.included ?? [], keyword);
+        }
+
+        log.info(`[${name}] No recognized data structure. First 500 chars: ${JSON.stringify(data).slice(0, 500)}`);
+        return [];
+    } catch (err) {
+        log.warning(`[${name}] Error: ${(err as Error).message}`);
+        return [];
+    }
+}
+
+// Extract posts from GraphQL cluster response
+function extractPostsFromClusters(searchResult: any, included: any[], keyword: string): PostResult[] {
     const results: PostResult[] = [];
     const now = new Date().toISOString();
-    const seen = new Set<string>();
+    const includedMap = buildIncludedMap(included);
 
-    // Method 1: Extract activity URNs from the HTML directly
-    // LinkedIn embeds post URNs in various attributes and embedded JSON
-    const activityRegex = /urn:li:activity:(\d+)/g;
-    let match;
-    while ((match = activityRegex.exec(html)) !== null) {
-        const activityId = match[1];
-        const postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${activityId}/`;
-        if (!seen.has(postUrl)) {
-            seen.add(postUrl);
-            results.push({ author_name: 'Unknown', keyword, post_url: postUrl, scraped_at: now });
-        }
-    }
+    for (const cluster of searchResult.elements ?? []) {
+        for (const searchItem of cluster.items ?? []) {
+            const item = searchItem?.item;
+            if (!item) continue;
 
-    // Method 2: Extract ugcPost URNs
-    const ugcRegex = /urn:li:ugcPost:(\d+)/g;
-    while ((match = ugcRegex.exec(html)) !== null) {
-        const postId = match[1];
-        const postUrl = `https://www.linkedin.com/feed/update/urn:li:ugcPost:${postId}/`;
-        if (!seen.has(postUrl)) {
-            seen.add(postUrl);
-            results.push({ author_name: 'Unknown', keyword, post_url: postUrl, scraped_at: now });
-        }
-    }
+            let entity = item.entityResult;
 
-    // Method 3: Try to extract author names from embedded JSON
-    // LinkedIn stores data in <code> elements; try to find and parse them
-    const codeBlockRegex = /<code[^>]*>(.*?)<\/code>/gs;
-    while ((match = codeBlockRegex.exec(html)) !== null) {
-        try {
-            const decoded = match[1]
-                .replace(/&lt;/g, '<')
-                .replace(/&gt;/g, '>')
-                .replace(/&amp;/g, '&')
-                .replace(/&quot;/g, '"')
-                .replace(/&#39;/g, "'");
-
-            // Try to parse as JSON
-            const jsonData = JSON.parse(decoded);
-            if (jsonData?.included && Array.isArray(jsonData.included)) {
-                log.info(`Found embedded JSON with ${jsonData.included.length} included items`);
-                enrichResultsFromIncluded(jsonData.included, results);
+            // Try resolving URN reference (Rest.li normalized format uses * prefix)
+            if (!entity && item['*entityResult']) {
+                entity = includedMap.get(item['*entityResult']);
             }
-        } catch {
-            // Not valid JSON, skip
+
+            if (!entity) continue;
+
+            const post = entityToPost(entity, keyword, now, includedMap);
+            if (post) results.push(post);
         }
+    }
+
+    // Fallback: scan included for activities
+    if (results.length === 0) {
+        log.info('Clusters had no entities, scanning included array...');
+        return extractPostsFromIncluded(included, keyword);
     }
 
     return results;
 }
 
-// Enrich results with author names from LinkedIn's included data
-function enrichResultsFromIncluded(included: any[], results: PostResult[]): void {
-    // Build maps: activityUrn -> author info
-    const activityToAuthor = new Map<string, string>();
+// Extract posts from REST elements response
+function extractPostsFromElements(elements: any[], included: any[], keyword: string): PostResult[] {
+    const results: PostResult[] = [];
+    const now = new Date().toISOString();
+    const includedMap = buildIncludedMap(included);
+
+    for (const el of elements) {
+        // Could be the element itself or nested items
+        if (el.items) {
+            for (const searchItem of el.items) {
+                const entity = searchItem?.item?.entityResult ?? searchItem?.entityResult ?? searchItem;
+                const post = entityToPost(entity, keyword, now, includedMap);
+                if (post) results.push(post);
+            }
+        } else {
+            const post = entityToPost(el, keyword, now, includedMap);
+            if (post) results.push(post);
+        }
+    }
+
+    if (results.length === 0) {
+        return extractPostsFromIncluded(included, keyword);
+    }
+
+    return results;
+}
+
+// Extract posts from included array directly
+function extractPostsFromIncluded(included: any[], keyword: string): PostResult[] {
+    const results: PostResult[] = [];
+    const now = new Date().toISOString();
+    const seen = new Set<string>();
 
     for (const item of included) {
-        const type = item.$type ?? item['$type'] ?? '';
+        const urn = item.entityUrn ?? item['$id'] ?? '';
+        if (!urn.includes('activity') && !urn.includes('ugcPost')) continue;
 
-        // Look for actor/author information linked to activities
-        if (type.includes('Update') || type.includes('Activity') || type.includes('Post')) {
-            const urn = item.entityUrn ?? item['*entityUrn'] ?? '';
-            const authorName =
-                item.actorName ??
-                item.actor?.name?.text ??
-                item.title?.text ??
-                '';
-            if (urn && authorName) {
-                activityToAuthor.set(urn, authorName);
-            }
-        }
+        const activityId = urn.split(':').pop();
+        if (!activityId) continue;
 
-        // MiniProfile type - map profile URN to name
-        if (type.includes('MiniProfile') || type.includes('Profile')) {
-            const name = [item.firstName, item.lastName].filter(Boolean).join(' ');
-            if (name && item.entityUrn) {
-                activityToAuthor.set(item.entityUrn, name);
-            }
-        }
+        const postUrl = urn.includes('activity')
+            ? `https://www.linkedin.com/feed/update/urn:li:activity:${activityId}/`
+            : `https://www.linkedin.com/feed/update/urn:li:ugcPost:${activityId}/`;
+
+        if (seen.has(postUrl)) continue;
+        seen.add(postUrl);
+
+        const authorName =
+            item.actorName ?? item.actor?.name?.text ?? item.title?.text ??
+            item.name?.text ?? item.firstName ? `${item.firstName} ${item.lastName}` : 'Unknown';
+
+        results.push({ author_name: authorName, keyword, post_url: postUrl, scraped_at: now });
     }
 
-    // Update results with author names where possible
-    for (const result of results) {
-        const urn = result.post_url.match(/urn:li:(activity|ugcPost):(\d+)/)?.[0];
-        if (urn && activityToAuthor.has(`urn:li:fsd_update:(urn:li:${urn},)`)) {
-            result.author_name = activityToAuthor.get(`urn:li:fsd_update:(urn:li:${urn},)`)!;
-        }
+    log.info(`Found ${results.length} posts from included array`);
+    return results;
+}
+
+function buildIncludedMap(included: any[]): Map<string, any> {
+    const map = new Map<string, any>();
+    for (const item of included) {
+        const key = item.entityUrn ?? item['$id'];
+        if (key) map.set(key, item);
     }
+    return map;
+}
+
+function entityToPost(entity: any, keyword: string, now: string, includedMap: Map<string, any>): PostResult | null {
+    if (!entity) return null;
+
+    const trackingUrn: string = entity.trackingUrn ?? '';
+    const entityUrn: string = entity.entityUrn ?? '';
+
+    let postUrl = '';
+    if (entityUrn.includes('activity')) {
+        postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${entityUrn.split(':').pop()}/`;
+    } else if (trackingUrn.includes('activity')) {
+        postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${trackingUrn.split(':').pop()}/`;
+    } else if (entity.navigationUrl?.includes('linkedin.com')) {
+        postUrl = entity.navigationUrl;
+    }
+
+    if (!postUrl) return null;
+
+    const authorName: string =
+        entity.title?.text ?? entity.primarySubtitle?.text ?? entity.summary?.text ?? 'Unknown';
+
+    return { author_name: authorName, keyword, post_url: postUrl, scraped_at: now };
+}
+
+// Extract activity URNs from HTML
+function extractPostsFromHtml(html: string, keyword: string): PostResult[] {
+    const results: PostResult[] = [];
+    const now = new Date().toISOString();
+    const seen = new Set<string>();
+
+    const urnRegex = /urn:li:(activity|ugcPost):(\d+)/g;
+    let match;
+    while ((match = urnRegex.exec(html)) !== null) {
+        const [fullUrn, type, id] = match;
+        const postUrl = `https://www.linkedin.com/feed/update/${fullUrn}/`;
+        if (seen.has(postUrl)) continue;
+        seen.add(postUrl);
+        results.push({ author_name: 'Unknown', keyword, post_url: postUrl, scraped_at: now });
+    }
+
+    return results;
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -226,59 +336,45 @@ await Actor.main(async () => {
     const seenUrls = new Set<string>();
 
     for (const keyword of input.keywords) {
-        const prevCount = keywordCounts[keyword];
+        let allPosts: PostResult[] = [];
+        let start = 0;
 
-        const url = buildSearchPageUrl(keyword, 0, dateFilter);
-        log.info(`Fetching "${keyword}"...`);
+        // Try paginated API calls first
+        while (allPosts.length < limit && start < limit * 2) {
+            const apiUrl = buildGraphqlUrl(keyword, start, dateFilter);
+            const apiHeaders = getHeaders(input.li_at, 'application/vnd.linkedin.normalized+json+2.1');
+            const apiPosts = await tryApproach(`API-${keyword}-p${start}`, apiUrl, apiHeaders, keyword, dateFilter);
 
-        try {
-            const res = await fetch(url, {
-                headers: getPageHeaders(input.li_at),
-                redirect: 'follow',
-            });
-
-            if (!res.ok) {
-                log.warning(`HTTP ${res.status} for "${keyword}" — stopping`);
-                continue;
-            }
-
-            const html = await res.text();
-            log.info(`Got ${html.length} chars of HTML for "${keyword}"`);
-
-            // Check if we're redirected to login
-            if (html.includes('/login') && !html.includes('search-results')) {
-                log.error('Redirected to login — li_at cookie may be expired');
-                continue;
-            }
-
-            // Log a sample of the HTML around search results for debugging
-            const srIdx = html.indexOf('search-result');
-            if (srIdx >= 0) {
-                log.info(`Found "search-result" in HTML at pos ${srIdx}`);
-                log.info(`HTML sample: ${html.slice(srIdx, srIdx + 500)}`);
+            if (apiPosts.length > 0) {
+                const newPosts = apiPosts.filter(p => !seenUrls.has(p.post_url));
+                if (newPosts.length === 0) {
+                    log.info(`No new posts at start=${start}, stopping pagination`);
+                    break;
+                }
+                allPosts.push(...newPosts);
+                for (const p of newPosts) seenUrls.add(p.post_url);
+            } else if (start === 0) {
+                // API returned nothing on first page, try HTML fallback
+                log.info('API returned no posts, trying HTML fallback...');
+                const htmlUrl = buildSearchPageUrl(keyword, dateFilter);
+                const htmlHeaders = getHeaders(input.li_at, 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8');
+                const htmlPosts = await tryApproach(`HTML-${keyword}`, htmlUrl, htmlHeaders, keyword, dateFilter);
+                allPosts.push(...htmlPosts.filter(p => !seenUrls.has(p.post_url)));
+                for (const p of allPosts) seenUrls.add(p.post_url);
+                break;
             } else {
-                log.info('No "search-result" found in HTML');
+                break;
             }
 
-            // Log embedded <code> blocks count
-            const codeMatches = html.match(/<code[^>]*id="bpr-guid/g);
-            log.info(`Found ${codeMatches?.length ?? 0} LinkedIn <code> data blocks`);
+            start += 10;
+            await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
+        }
 
-            const posts = extractPostsFromHtml(html, keyword);
-            log.info(`Extracted ${posts.length} unique posts for "${keyword}"`);
-            if (posts.length > 0) {
-                log.info(`Sample post: ${JSON.stringify(posts[0])}`);
-            }
-
-            for (const post of posts) {
-                if (keywordCounts[keyword] >= limit) break;
-                if (seenUrls.has(post.post_url)) continue;
-                seenUrls.add(post.post_url);
-                await Dataset.pushData(post);
-                keywordCounts[keyword]++;
-            }
-        } catch (err) {
-            log.error(`Fetch error for "${keyword}": ${(err as Error).message}`);
+        // Push results
+        for (const post of allPosts) {
+            if (keywordCounts[keyword] >= limit) break;
+            await Dataset.pushData(post);
+            keywordCounts[keyword]++;
         }
 
         log.info(`"${keyword}": ${keywordCounts[keyword]} posts collected`);
