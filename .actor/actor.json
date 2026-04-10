@@ -15,7 +15,7 @@
                 "overview": {
                     "title": "Results",
                     "transformation": {
-                        "fields": ["author_name", "keyword", "post_url", "reactions", "comments", "scraped_at"]
+                        "fields": ["author_name", "keyword", "post_url", "scraped_at"]
                     },
                     "display": {
                         "component": "table",
@@ -23,8 +23,6 @@
                             "author_name": { "label": "Author", "format": "text" },
                             "keyword": { "label": "Keyword", "format": "text" },
                             "post_url": { "label": "Post URL", "format": "link" },
-                            "reactions": { "label": "Reactions", "format": "number" },
-                            "comments": { "label": "Comments", "format": "number" },
                             "scraped_at": { "label": "Scraped At", "format": "datetime" }
                         }
                     }

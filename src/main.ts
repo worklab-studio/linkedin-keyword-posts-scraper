@@ -1,6 +1,5 @@
 import { Actor } from 'apify';
-import { Dataset, log } from 'crawlee';
-import { chromium } from 'playwright';
+import { Dataset, log, CheerioCrawler } from 'crawlee';
 
 interface Input {
     keywords: string[];
@@ -8,7 +7,7 @@ interface Input {
     from?: string;
     to?: string;
     limit?: number;
-    li_at: string;
+    li_at?: string;
     proxy?: {
         useApifyProxy?: boolean;
         apifyProxyGroups?: string[];
@@ -18,274 +17,170 @@ interface Input {
 
 interface PostResult {
     author_name: string;
-    author_profile: string;
     keyword: string;
     post_url: string;
-    reactions: number;
-    comments: number;
     scraped_at: string;
 }
 
-const LINKEDIN_DATE_FILTER_MAP: Record<string, string> = {
-    'last-1-day': 'past-24h',
-    'last-3-days': 'past-week',
-    'last-1-week': 'past-week',
-    'last-2-weeks': 'past-month',
-    'last-1-month': 'past-month',
-    'last-2-months': 'past-month',
-    'last-3-months': 'past-month',
-    'last-6-months': '',
-    'last-1-year': '',
+// Map date presets to Google's tbs param
+const DATE_TO_GOOGLE_TBS: Record<string, string> = {
+    'last-1-day': 'qdr:d',
+    'last-3-days': 'qdr:d3',
+    'last-1-week': 'qdr:w',
+    'last-2-weeks': 'qdr:w2',
+    'last-1-month': 'qdr:m',
+    'last-2-months': 'qdr:m2',
+    'last-3-months': 'qdr:m3',
+    'last-6-months': 'qdr:m6',
+    'last-1-year': 'qdr:y',
 };
 
-function resolveLinkedInDateFilter(input: Input): string {
-    if (input.date && input.date !== 'ignore') return LINKEDIN_DATE_FILTER_MAP[input.date] ?? '';
+function resolveGoogleTbs(input: Input): string {
+    if (input.date && input.date !== 'ignore') {
+        return DATE_TO_GOOGLE_TBS[input.date] ?? '';
+    }
     if (input.from || input.to) {
         const now = Date.now();
         const start = input.from ? new Date(input.from).getTime() : now - 180 * 86400000;
         const days = (now - start) / 86400000;
-        if (days <= 1) return 'past-24h';
-        if (days <= 7) return 'past-week';
-        if (days <= 30) return 'past-month';
-        return '';
+        if (days <= 1) return 'qdr:d';
+        if (days <= 7) return 'qdr:w';
+        if (days <= 30) return 'qdr:m';
+        if (days <= 90) return 'qdr:m3';
+        if (days <= 180) return 'qdr:m6';
+        return 'qdr:y';
     }
-    return '';
+    return 'qdr:w'; // Default: past week
 }
 
-function buildSearchUrl(keyword: string, dateFilter: string): string {
-    let url = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&origin=FACETED_SEARCH&sortBy=%5B%22date_posted%22%5D`;
-    if (dateFilter) url += `&datePosted=%5B%22${dateFilter}%22%5D`;
+function buildGoogleSearchUrl(keyword: string, tbs: string, start: number = 0): string {
+    const query = `site:linkedin.com/posts "${keyword}"`;
+    let url = `https://www.google.com/search?q=${encodeURIComponent(query)}&num=10`;
+    if (tbs) url += `&tbs=${tbs}`;
+    if (start > 0) url += `&start=${start}`;
     return url;
 }
 
-// Extract post data from intercepted API responses
-function extractPostsFromApiData(included: any[]): Map<string, any> {
-    const posts = new Map<string, any>();
+function extractLinkedInPostsFromGoogle(html: string): { url: string; author: string }[] {
+    const results: { url: string; author: string }[] = [];
+    const seen = new Set<string>();
 
-    for (const item of included) {
-        const urn = item.entityUrn ?? item['$id'] ?? '';
-        const type = item['$type'] ?? '';
+    // Google results contain LinkedIn post URLs in various formats
+    // Match linkedin.com/posts/username_slug patterns
+    const urlRegex = /https?:\/\/(?:www\.)?linkedin\.com\/posts\/[a-zA-Z0-9_-]+_[a-zA-Z0-9_-]+/g;
+    let match;
+    while ((match = urlRegex.exec(html)) !== null) {
+        let postUrl = match[0].split('&')[0].split('"')[0]; // Clean up trailing params
+        if (seen.has(postUrl)) continue;
+        seen.add(postUrl);
 
-        // Look for update/activity entities
-        if (urn.includes('fsd_update') || urn.includes('activity') || urn.includes('ugcPost')) {
-            posts.set(urn, item);
+        // Extract author from URL: /posts/firstname-lastname_slug
+        const authorMatch = postUrl.match(/\/posts\/([a-zA-Z0-9_-]+?)_/);
+        let author = 'Unknown';
+        if (authorMatch) {
+            author = authorMatch[1].replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
         }
 
-        // Also collect actor/profile data
-        if (type.includes('MiniProfile') || type.includes('Actor')) {
-            posts.set(urn, item);
-        }
+        results.push({ url: postUrl, author });
     }
 
-    return posts;
+    // Also match /feed/update/ URLs
+    const feedRegex = /https?:\/\/(?:www\.)?linkedin\.com\/feed\/update\/urn:li:activity:(\d+)/g;
+    while ((match = feedRegex.exec(html)) !== null) {
+        const postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${match[1]}/`;
+        if (seen.has(postUrl)) continue;
+        seen.add(postUrl);
+        results.push({ url: postUrl, author: 'Unknown' });
+    }
+
+    return results;
 }
 
 await Actor.main(async () => {
     const input = (await Actor.getInput<Input>())!;
     if (!input?.keywords?.length) throw new Error('Input must include at least one keyword.');
-    if (!input?.li_at) throw new Error('LinkedIn li_at cookie is required.');
 
     const limit = input.limit ?? 50;
-    const dateFilter = resolveLinkedInDateFilter(input);
+    const tbs = resolveGoogleTbs(input);
 
     log.info('='.repeat(60));
-    log.info('LinkedIn Keyword Posts Scraper');
+    log.info('LinkedIn Keyword Posts Scraper (via Google Search)');
     log.info(`Keywords: ${input.keywords.join(', ')}`);
     log.info(`Limit per keyword: ${limit}`);
-    log.info(`Date filter: ${dateFilter || 'none (all time)'}`);
+    log.info(`Time filter: ${tbs || 'none'}`);
     log.info('='.repeat(60));
 
-    let proxyUrl: string | undefined;
+    // Proxy config
+    let proxyConfiguration: any = undefined;
     if (input.proxy?.useApifyProxy) {
-        const pc = await Actor.createProxyConfiguration({ groups: input.proxy.apifyProxyGroups ?? ['RESIDENTIAL'] });
-        proxyUrl = await pc!.newUrl();
-        log.info('Using Apify Residential proxy');
+        proxyConfiguration = await Actor.createProxyConfiguration({
+            groups: input.proxy.apifyProxyGroups ?? ['GOOGLE_SERP'],
+        });
+        log.info('Using Apify proxy');
     } else if (input.proxy?.proxyUrls?.length) {
-        proxyUrl = input.proxy.proxyUrls[0];
+        proxyConfiguration = await Actor.createProxyConfiguration({
+            proxyUrls: input.proxy.proxyUrls,
+        });
     }
-
-    const launchOptions: any = {
-        headless: true,
-        args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
-    };
-    if (proxyUrl) launchOptions.proxy = { server: proxyUrl };
-
-    const browser = await chromium.launch(launchOptions);
-    const context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        viewport: { width: 1920, height: 1080 },
-    });
-
-    await context.addCookies([
-        { name: 'li_at', value: input.li_at, domain: '.linkedin.com', path: '/', httpOnly: true, secure: true },
-        { name: 'JSESSIONID', value: `"ajax:${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}"`, domain: '.linkedin.com', path: '/', secure: true },
-    ]);
-
-    const page = await context.newPage();
-
-    // Warmup
-    log.info('Warming up session...');
-    try {
-        await page.goto('https://www.linkedin.com/check/ring/dashboard', { waitUntil: 'commit', timeout: 15000 });
-    } catch { log.info('Warmup slow, continuing...'); }
-    await page.waitForTimeout(2000);
-
-    if (page.url().includes('/login') || page.url().includes('/authwall')) {
-        await browser.close();
-        throw new Error('LinkedIn auth failed. Refresh your li_at cookie.');
-    }
-    log.info('Session established');
 
     const keywordCounts: Record<string, number> = {};
     for (const kw of input.keywords) keywordCounts[kw] = 0;
     const seenUrls = new Set<string>();
 
+    // Build all requests
+    const requests: { url: string; userData: { keyword: string } }[] = [];
     for (const keyword of input.keywords) {
-        log.info(`Searching for "${keyword}"...`);
-
-        try {
-            // Intercept API responses to capture post data
-            const apiData: any[] = [];
-            const responseHandler = async (response: any) => {
-                const url = response.url();
-                if (url.includes('/graphql') || url.includes('/search/')) {
-                    try {
-                        const json = await response.json();
-                        if (json?.included) apiData.push(...json.included);
-                        if (json?.data?.included) apiData.push(...json.data.included);
-                    } catch { /* not JSON */ }
-                }
-            };
-            page.on('response', responseHandler);
-
-            try {
-                await page.goto(buildSearchUrl(keyword, dateFilter), { waitUntil: 'commit', timeout: 30000 });
-            } catch {
-                log.warning(`Navigation slow for "${keyword}", continuing...`);
-            }
-
-            // Wait for posts to render
-            try {
-                await page.waitForSelector('[role="listitem"]', { timeout: 20000 });
-                log.info('Posts rendered');
-            } catch {
-                log.warning('No listitem found, waiting more...');
-                await page.waitForTimeout(10000);
-            }
-            await page.waitForTimeout(3000);
-
-            log.info(`Page loaded, intercepted ${apiData.length} API items`);
-
-            // Extract from DOM
-            const domPosts = await page.evaluate(() => {
-                const results: { author: string; profileUrl: string; reactions: number; comments: number }[] = [];
-
-                function parseNum(t: string | null | undefined): number {
-                    if (!t) return 0;
-                    const c = t.trim().toLowerCase().replace(/,/g, '');
-                    if (c.includes('k')) return Math.round(parseFloat(c) * 1000);
-                    if (c.includes('m')) return Math.round(parseFloat(c) * 1000000);
-                    return parseInt(c, 10) || 0;
-                }
-
-                const containers = document.querySelectorAll('[role="listitem"]');
-                for (const el of containers) {
-                    const profileLink = el.querySelector('a[href*="/in/"], a[href*="/company/"]') as HTMLAnchorElement;
-                    if (!profileLink) continue;
-
-                    let author = 'Unknown';
-                    const menuBtn = el.querySelector('[aria-label*="post by"]');
-                    if (menuBtn) {
-                        const m = menuBtn.getAttribute('aria-label')?.match(/post by (.+)/i);
-                        if (m) author = m[1].trim();
-                    }
-                    if (author === 'Unknown') {
-                        const p = el.querySelector('p');
-                        if (p?.textContent?.trim() && p.textContent.trim().length < 50) author = p.textContent.trim();
-                    }
-
-                    let reactions = 0, comments = 0;
-                    for (const span of el.querySelectorAll('span')) {
-                        const t = span.textContent?.trim().toLowerCase() ?? '';
-                        if (t.match(/^\d+\s*reactions?$/)) reactions = parseNum(t.match(/(\d+)/)?.[1]);
-                        else if (t.match(/^\d+\s*comments?$/)) comments = parseNum(t.match(/(\d+)/)?.[1]);
-                    }
-
-                    results.push({ author, profileUrl: profileLink.href.split('?')[0], reactions, comments });
-                }
-                return results;
+        const pages = Math.ceil(limit / 10);
+        for (let p = 0; p < pages; p++) {
+            requests.push({
+                url: buildGoogleSearchUrl(keyword, tbs, p * 10),
+                userData: { keyword },
             });
+        }
+    }
 
-            log.info(`DOM: ${domPosts.length} posts, API: ${apiData.length} items`);
+    const crawler = new CheerioCrawler({
+        proxyConfiguration,
+        maxRequestRetries: 3,
+        requestHandlerTimeoutSecs: 30,
+        maxConcurrency: 1,
 
-            // Extract activity URNs from API data and page HTML
-            const activityUrns: string[] = [];
-            for (const item of apiData) {
-                const urn = item.entityUrn ?? item['$id'] ?? '';
-                if (urn.includes('fsd_update')) {
-                    // fsd_update URNs contain the activity ID: urn:li:fsd_update:(urn:li:activity:123,...)
-                    const actMatch = urn.match(/activity:(\d+)/);
-                    if (actMatch) activityUrns.push(actMatch[1]);
-                }
+        async requestHandler({ request, body }) {
+            const { keyword } = request.userData as { keyword: string };
+            const html = body.toString();
+
+            // Check if Google blocked us
+            if (html.includes('detected unusual traffic') || html.includes('CAPTCHA')) {
+                log.warning(`Google CAPTCHA for "${keyword}" — retrying with different proxy`);
+                throw new Error('Google CAPTCHA detected');
             }
 
-            // Also extract from page HTML as fallback
-            if (activityUrns.length === 0) {
-                const html = await page.content();
-                const matches = [...html.matchAll(/urn:li:activity:(\d+)/g)];
-                for (const m of matches) {
-                    if (!activityUrns.includes(m[1])) activityUrns.push(m[1]);
-                }
-            }
-
-            log.info(`Found ${activityUrns.length} activity IDs`);
+            const posts = extractLinkedInPostsFromGoogle(html);
+            log.info(`Google page for "${keyword}": found ${posts.length} LinkedIn posts`);
 
             const now = new Date().toISOString();
-            for (let i = 0; i < domPosts.length; i++) {
+            for (const post of posts) {
                 if (keywordCounts[keyword] >= limit) break;
-                const post = domPosts[i];
-
-                // Match post URL from activity URNs (by order)
-                let postUrl = post.profileUrl;
-                if (i < activityUrns.length) {
-                    postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${activityUrns[i]}/`;
-                }
-
-                if (seenUrls.has(postUrl)) continue;
-                seenUrls.add(postUrl);
+                if (seenUrls.has(post.url)) continue;
+                seenUrls.add(post.url);
 
                 await Dataset.pushData({
                     author_name: post.author,
-                    author_profile: post.profileUrl,
                     keyword,
-                    post_url: postUrl,
-                    reactions: post.reactions,
-                    comments: post.comments,
+                    post_url: post.url,
                     scraped_at: now,
                 } as PostResult);
 
                 keywordCounts[keyword]++;
             }
+        },
 
-            log.info(`"${keyword}": ${keywordCounts[keyword]} posts`);
+        failedRequestHandler({ request, error }) {
+            log.error(`Failed: ${request.url.slice(0, 100)} — ${(error as Error).message}`);
+        },
+    });
 
-            // Remove listener for next keyword
-            page.removeListener('response', responseHandler);
-
-            // Scroll for more if needed
-            if (keywordCounts[keyword] < limit) {
-                await page.evaluate(() => window.scrollBy(0, window.innerHeight * 3));
-                await page.waitForTimeout(3000);
-            }
-
-        } catch (err) {
-            log.error(`Error scraping "${keyword}": ${(err as Error).message}`);
-        }
-
-        await page.waitForTimeout(2000 + Math.random() * 3000);
-    }
-
-    await browser.close();
+    await crawler.run(requests);
 
     const total = Object.values(keywordCounts).reduce((a, b) => a + b, 0);
     log.info('='.repeat(60));
