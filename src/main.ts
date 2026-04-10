@@ -1,6 +1,5 @@
 import { Actor } from 'apify';
 import { Dataset, log, CheerioCrawler } from 'crawlee';
-import { chromium } from 'playwright';
 
 interface Input {
     keywords: string[];
@@ -24,10 +23,23 @@ const DATE_MAP: Record<string, string> = {
     'last-3-months': 'past-month',
 };
 
-function buildSearchUrl(keyword: string, dateFilter: string): string {
-    let url = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&origin=FACETED_SEARCH&sortBy=%5B%22date_posted%22%5D`;
-    if (dateFilter) url += `&datePosted=%5B%22${dateFilter}%22%5D`;
-    return url;
+function getHeaders(li_at: string): Record<string, string> {
+    return {
+        'accept': 'text/html,application/xhtml+xml',
+        'accept-language': 'en-US,en;q=0.9',
+        'cookie': `li_at=${li_at}`,
+        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    };
+}
+
+function extractUrns(html: string): string[] {
+    const seen = new Set<string>();
+    const regex = /urn:li:(activity|ugcPost):(\d+)/g;
+    let m;
+    while ((m = regex.exec(html)) !== null) {
+        seen.add(m[0]);
+    }
+    return [...seen];
 }
 
 function parsePostPage(html: string): { author: string; text: string; reactions: number; comments: number } {
@@ -68,153 +80,58 @@ await Actor.main(async () => {
     log.info(`Date filter: ${dateFilter || 'none'}`);
     log.info('='.repeat(60));
 
-    // Proxy
-    let proxyUrl: string | undefined;
     let proxyConfiguration: any = undefined;
     if (input.proxy?.useApifyProxy) {
-        const pc = await Actor.createProxyConfiguration({ groups: input.proxy.apifyProxyGroups ?? ['RESIDENTIAL'] });
-        proxyUrl = await pc!.newUrl();
-        proxyConfiguration = pc;
-        log.info('Using Apify proxy');
+        proxyConfiguration = await Actor.createProxyConfiguration({
+            groups: input.proxy.apifyProxyGroups ?? ['RESIDENTIAL'],
+        });
     }
 
-    // ── Step 1: Playwright scrolls LinkedIn search, captures URNs ──
-    log.info('Step 1: Scrolling LinkedIn search pages to collect post URNs...');
-
-    // Don't use proxy for LinkedIn — proxy causes empty/blocked responses
-    const launchOptions: any = { headless: true, args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'] };
-
-    const browser = await chromium.launch(launchOptions);
-    const context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        viewport: { width: 1920, height: 1080 },
-    });
-    await context.addCookies([
-        { name: 'li_at', value: input.li_at, domain: '.linkedin.com', path: '/', httpOnly: true, secure: true },
-        { name: 'JSESSIONID', value: `"ajax:${Math.random().toString(36).slice(2)}"`, domain: '.linkedin.com', path: '/', secure: true },
-    ]);
-
-    const page = await context.newPage();
-
-    // Warmup
-    try { await page.goto('https://www.linkedin.com/check/ring/dashboard', { waitUntil: 'commit', timeout: 15000 }); }
-    catch { /* ok */ }
-    await page.waitForTimeout(2000);
-
-    if (page.url().includes('/login') || page.url().includes('/authwall')) {
-        await browser.close();
-        throw new Error('LinkedIn auth failed. Refresh your li_at cookie.');
-    }
-    log.info('Session established');
-
+    // Step 1: Fetch LinkedIn search pages to get post URNs
+    // Multiple variants per keyword to maximize unique URNs
+    log.info('Step 1: Collecting post URNs from LinkedIn search...');
     const allUrns: { urn: string; keyword: string }[] = [];
     const seenUrns = new Set<string>();
 
     for (const keyword of input.keywords) {
-        log.info(`Scrolling search for "${keyword}"...`);
+        const variants = [
+            { sort: 'date_posted', filter: dateFilter },
+            { sort: 'relevance', filter: dateFilter },
+            { sort: 'date_posted', filter: '' },
+            { sort: 'relevance', filter: '' },
+        ];
 
-        // Capture URNs from network responses AND page HTML
-        const capturedUrns = new Set<string>();
+        for (const v of variants) {
+            if (allUrns.filter(u => u.keyword === keyword).length >= limit) break;
 
-        const responseHandler = async (response: any) => {
+            let url = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&origin=FACETED_SEARCH&sortBy=%5B%22${v.sort}%22%5D`;
+            if (v.filter) url += `&datePosted=%5B%22${v.filter}%22%5D`;
+
             try {
-                const text = await response.text();
-                const matches = text.matchAll(/urn:li:(activity|ugcPost):(\d+)/g);
-                for (const m of matches) capturedUrns.add(m[0]);
-            } catch { /* ignore non-text responses */ }
-        };
-        page.on('response', responseHandler);
+                const res = await fetch(url, { headers: getHeaders(input.li_at), redirect: 'follow' });
+                const html = await res.text();
+                const urns = extractUrns(html);
 
-        // Try loading the search page — retry up to 3 times
-        let pageLoaded = false;
-        for (let attempt = 1; attempt <= 3; attempt++) {
-            try {
-                await page.goto(buildSearchUrl(keyword, dateFilter), { waitUntil: 'domcontentloaded', timeout: 45000 });
-                pageLoaded = true;
-                break;
-            } catch (err) {
-                log.warning(`  Attempt ${attempt}/3 failed: ${(err as Error).message.slice(0, 100)}`);
-                if (attempt < 3) await page.waitForTimeout(3000);
-            }
-        }
-
-        if (!pageLoaded) {
-            log.error(`  Could not load search page for "${keyword}", skipping`);
-            continue;
-        }
-
-        // Wait for content to render
-        try {
-            await page.waitForSelector('[role="listitem"]', { timeout: 15000 });
-            log.info('  Content rendered');
-        } catch {
-            log.warning('  No listitem found, waiting longer...');
-            await page.waitForTimeout(8000);
-        }
-        await page.waitForTimeout(3000);
-
-        // Also extract URNs from current page HTML
-        const html = await page.content();
-        const htmlMatches = html.matchAll(/urn:li:(activity|ugcPost):(\d+)/g);
-        for (const m of htmlMatches) capturedUrns.add(m[0]);
-
-        log.info(`  Initial: ${capturedUrns.size} URNs`);
-
-        // Scroll to load more posts
-        let emptyScrolls = 0;
-        let scrollAttempts = 0;
-        const maxScrolls = Math.min(Math.ceil(limit / 3), 30);
-
-        while (capturedUrns.size - seenUrns.size < limit && scrollAttempts < maxScrolls && emptyScrolls < 3) {
-            const prevSize = capturedUrns.size;
-
-            await page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
-            await page.waitForTimeout(3000);
-
-            // Click "Load more" if visible
-            try {
-                const loadMore = await page.$('button:has-text("Load more")');
-                if (loadMore) {
-                    await loadMore.click();
-                    await page.waitForTimeout(4000);
+                let newCount = 0;
+                for (const urn of urns) {
+                    if (seenUrns.has(urn)) continue;
+                    if (allUrns.filter(u => u.keyword === keyword).length >= limit) break;
+                    seenUrns.add(urn);
+                    allUrns.push({ urn, keyword });
+                    newCount++;
                 }
-            } catch { /* no button */ }
-
-            // Extract URNs from updated page
-            const newHtml = await page.content();
-            const newMatches = newHtml.matchAll(/urn:li:(activity|ugcPost):(\d+)/g);
-            for (const m of newMatches) capturedUrns.add(m[0]);
-
-            scrollAttempts++;
-            if (capturedUrns.size === prevSize) {
-                emptyScrolls++;
-                log.info(`  Scroll ${scrollAttempts}: no new URNs (${emptyScrolls}/3 empty)`);
-            } else {
-                emptyScrolls = 0;
-                log.info(`  Scroll ${scrollAttempts}: ${capturedUrns.size} URNs total`);
+                log.info(`"${keyword}" (${v.sort}/${v.filter || 'all'}): ${urns.length} URNs, ${newCount} new`);
+            } catch (err) {
+                log.warning(`Fetch error: ${(err as Error).message.slice(0, 100)}`);
             }
+
+            await new Promise(r => setTimeout(r, 1500));
         }
-
-        page.removeListener('response', responseHandler);
-
-        // Add new URNs
-        let newCount = 0;
-        for (const urn of capturedUrns) {
-            if (seenUrns.has(urn)) continue;
-            if (newCount >= limit) break;
-            seenUrns.add(urn);
-            allUrns.push({ urn, keyword });
-            newCount++;
-        }
-
-        log.info(`"${keyword}": collected ${newCount} unique post URNs`);
-        await page.waitForTimeout(2000);
     }
 
-    await browser.close();
-    log.info(`Step 1 done: ${allUrns.length} total URNs`);
+    log.info(`Step 1 done: ${allUrns.length} unique post URNs`);
 
-    // ── Step 2: Fetch each post's public page for details ──
+    // Step 2: Fetch each post's public page for full details
     if (allUrns.length > 0) {
         log.info('Step 2: Fetching post details...');
 
@@ -234,9 +151,9 @@ await Actor.main(async () => {
                 const { keyword } = request.userData as { keyword: string };
                 const parsed = parsePostPage(body.toString());
 
-                // Skip login/signup pages (private posts)
-                if (parsed.author === 'Sign Up' || parsed.author === 'LinkedIn' || parsed.text === '') {
-                    log.info(`⊘ Skipped private post: ${request.url.slice(0, 80)}`);
+                // Skip private/login-required posts
+                if (parsed.author === 'Sign Up' || parsed.author === 'LinkedIn' || !parsed.text) {
+                    log.info(`⊘ Skipped private post`);
                     return;
                 }
 
@@ -262,7 +179,7 @@ await Actor.main(async () => {
     }
 
     log.info('='.repeat(60));
-    log.info(`Done. Total: ${allUrns.length} posts`);
+    log.info(`Done. Total: ${allUrns.length} URNs collected`);
     log.info('='.repeat(60));
 
     await Actor.setValue('OUTPUT_SUMMARY', { total_posts: allUrns.length, completed_at: new Date().toISOString() });
