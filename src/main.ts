@@ -252,15 +252,20 @@ await Actor.main(async () => {
             log.info(`Elements count: ${clusters?.elements?.length}`);
             if (clusters?.elements?.[0]) {
                 const el = clusters.elements[0];
-                log.info(`First element keys: ${JSON.stringify(Object.keys(el))}`);
-                log.info(`First element items count: ${el.items?.length}`);
-                if (el.items?.[0]) {
-                    log.info(`First item (500 chars): ${JSON.stringify(el.items[0]).slice(0, 500)}`);
+                // Check results array (may contain URN references)
+                log.info(`First element results count: ${el.results?.length}`);
+                if (el.results?.[0]) {
+                    log.info(`First result (500 chars): ${JSON.stringify(el.results[0]).slice(0, 500)}`);
                 }
-                if (el.items?.[1]) {
-                    log.info(`Second item (500 chars): ${JSON.stringify(el.items[1]).slice(0, 500)}`);
+                if (el.results?.[1]) {
+                    log.info(`Second result (500 chars): ${JSON.stringify(el.results[1]).slice(0, 500)}`);
                 }
             }
+            // Log full included array
+            log.info(`Included total: ${data?.included?.length}`);
+            // Log full response size
+            const fullJson = JSON.stringify(data);
+            log.info(`Full response size: ${fullJson.length} chars`);
 
             if (data?.status === 401 || data?.message?.toLowerCase().includes('auth')) {
                 throw new Error(
